@@ -1,0 +1,6 @@
+{
+  "name": "GST Online Seller",
+  "description": "GST Filing & TCS Reconciliation Tool for E-Commerce Sellers starting with Meesho, Amazon, and Flipkart",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
