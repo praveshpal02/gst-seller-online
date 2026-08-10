@@ -21,7 +21,7 @@ export function parseNumber(val: any): number {
 
 /**
  * Safely extracts a string or numeric value from a row using aliases.
- * Uses exact clean key match first, then partial clean key match.
+ * Uses exact clean key match first, then partial clean key match for specific aliases.
  */
 function getValueFromRow(row: Record<string, any>, aliases: string[]): any {
   if (!row) return '';
@@ -45,7 +45,7 @@ function getValueFromRow(row: Record<string, any>, aliases: string[]): any {
   // 2. Second pass: partial clean key match (.includes)
   for (const alias of aliases) {
     const aliasClean = alias.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!aliasClean) continue;
+    if (!aliasClean || aliasClean.length < 3) continue;
     for (const key of keys) {
       const keyClean = key.toLowerCase().replace(/[^a-z0-9]/g, '');
       if (keyClean.includes(aliasClean)) {
@@ -60,20 +60,26 @@ function getValueFromRow(row: Record<string, any>, aliases: string[]): any {
   return '';
 }
 
-function getBestSheetAnalysis(workbook: XLSX.WorkBook): SheetHeaderAnalysis | null {
-  if (!workbook || workbook.SheetNames.length === 0) return null;
+export function getAllSheetsAnalysis(workbook: XLSX.WorkBook): SheetHeaderAnalysis[] {
+  if (!workbook || workbook.SheetNames.length === 0) return [];
 
-  let best: SheetHeaderAnalysis | null = null;
+  const sheets: SheetHeaderAnalysis[] = [];
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
 
     const analysis = analyzeWorksheetHeaders(sheet, sheetName);
-    if (!best || analysis.rawHeaders.length > best.rawHeaders.length) {
-      best = analysis;
+    if (analysis && analysis.rows.length > 0 && analysis.rawHeaders.length > 0) {
+      sheets.push(analysis);
     }
   }
-  return best;
+  return sheets;
+}
+
+export function getBestSheetAnalysis(workbook: XLSX.WorkBook): SheetHeaderAnalysis | null {
+  const sheets = getAllSheetsAnalysis(workbook);
+  if (sheets.length === 0) return null;
+  return sheets.reduce((best, curr) => (curr.rawHeaders.length > best.rawHeaders.length ? curr : best), sheets[0]);
 }
 
 export interface MeeshoImportSummary {
@@ -85,12 +91,6 @@ export interface MeeshoImportSummary {
   returnsTaxableValue: number;
 }
 
-/**
- * Calculates dynamic Meesho import summary metrics from parsed transactions.
- * Formula:
- *  - successRecords = salesRecordsCount + returnsRecordsCount
- *  - netSale = sum(raw sales total_taxable_sale_value) - sum(raw return total_taxable_sale_value) rounded to 2 decimal places
- */
 export function calculateMeeshoImportSummary(
   transactions: MeeshoTransaction[]
 ): MeeshoImportSummary {
@@ -121,65 +121,92 @@ export async function parseMeeshoExcelFiles(
   const salesTransactions: MeeshoTransaction[] = [];
   const returnTransactions: MeeshoTransaction[] = [];
 
-  let tcsSalesRowsCount = 0;
-  let tcsSalesReturnRowsCount = 0;
-  let taxInvoiceRowsCount = 0;
+  const orderIdAliases = [
+    'sub order no', 'suborder no', 'sub order number', 'suborder number',
+    'sub order id', 'suborder id', 'return order id', 'sub order', 'suborder',
+    'credit note no', 'credit note number', 'order id', 'order no', 'order number', 'id'
+  ];
+
+  const stateAliases = [
+    'end customer state', 'customer state', 'delivery state', 'shipping state',
+    'ship to state', 'place of supply', 'pos state', 'pos', 'destination state',
+    'state name', 'state'
+  ];
+
+  const salesTaxableAliases = [
+    'total taxable supply value', 'total taxable supplies value', 'total taxable supply value rs',
+    'total taxable sale value', 'total taxable sales value', 'taxable supply value',
+    'taxable sale value', 'total taxable value', 'taxable value', 'taxable_value',
+    'taxable amount', 'net taxable amount', 'net taxable value', 'tcs taxable amount',
+    'tcs taxable value', 'taxable'
+  ];
+
+  const returnTaxableAliases = [
+    'total taxable supply value', 'total taxable supplies value', 'total taxable supply value rs',
+    'total taxable sale value', 'total taxable sales value', 'taxable supply value',
+    'taxable sale value', 'return taxable value', 'taxable return value',
+    'total taxable value', 'taxable value', 'taxable_value', 'credit note value',
+    'credit_note_value', 'taxable amount', 'net taxable amount', 'refund taxable amount',
+    'taxable'
+  ];
+
+  const gstRateAliases = ['gst rate', 'rate of tax', 'tax rate', 'gst %', 'gst_rate', 'rate'];
+  const igstAliases = ['igst amount', 'igst', 'integrated tax amount', 'integrated tax'];
+  const cgstAliases = ['cgst amount', 'cgst', 'central tax amount', 'central tax'];
+  const sgstAliases = ['sgst amount', 'sgst', 'state tax amount', 'state tax', 'utgst amount', 'utgst'];
+  const dateAliases = ['order date', 'return date', 'invoice date', 'credit note date', 'transaction date', 'date'];
 
   // 1. Process TCS Sales File
   if (files.tcsSales) {
     try {
       const data = await files.tcsSales.arrayBuffer();
       const workbook = XLSX.read(data, { type: 'array' });
-      const bestSheet = getBestSheetAnalysis(workbook);
+      const sheets = getAllSheetsAnalysis(workbook);
 
-      if (bestSheet && bestSheet.rows.length > 0) {
-        tcsSalesRowsCount = bestSheet.rows.length;
-        bestSheet.rows.forEach((row, idx) => {
-          const orderId = String(
-            getValueFromRow(row, ['sub order no', 'sub order', 'suborder id', 'order id', 'suborder no', 'order no', 'id']) || `TCS-ORD-${idx}`
-          ).trim();
-
-          const posStateRaw = String(
-            getValueFromRow(row, ['customer state', 'delivery state', 'state', 'place of supply', 'pos', 'state name']) || 'Delhi'
-          ).trim();
-
-          const taxableVal = parseNumber(
-            getValueFromRow(row, [
-              'total_taxable_sale_value',
-              'total taxable sale value',
-              'total taxable value',
-              'taxable sale value',
-              'taxable value',
-              'gross sales amount',
-              'tcs taxable amount',
-              'gross sales',
-              'net taxable amount',
-              'taxable amount',
-              'sales amount',
-              'total value',
-              'order value',
-              'amount',
-              'value'
-            ])
-          );
-
-          const gstRateRaw = String(getValueFromRow(row, ['gst rate', 'tax rate', 'rate', 'gst %']) || '5');
+      sheets.forEach((sheetAnalysis, sIdx) => {
+        sheetAnalysis.rows.forEach((row, idx) => {
+          const rawOrderId = String(getValueFromRow(row, orderIdAliases) || '').trim();
+          const posStateRaw = String(getValueFromRow(row, stateAliases) || 'Delhi').trim();
+          const taxableVal = parseNumber(getValueFromRow(row, salesTaxableAliases));
+          const gstRateRaw = String(getValueFromRow(row, gstRateAliases) || '5');
           const gstRate = parseNumber(gstRateRaw) || 5;
-
-          const dateStr = String(
-            getValueFromRow(row, ['order date', 'invoice date', 'date', 'transaction date']) || new Date().toISOString().split('T')[0]
-          ).trim();
+          const dateStr = String(getValueFromRow(row, dateAliases) || new Date().toISOString().split('T')[0]).trim();
 
           const { stateCode, stateName } = resolveIndianState(posStateRaw);
           const isInterState = stateCode !== sellerStateCode;
 
-          if (orderId || taxableVal > 0) {
+          if (rawOrderId || taxableVal !== 0) {
             const finalTaxable = Math.abs(taxableVal);
-            const tcsTotal = Math.round(finalTaxable * 0.01 * 100) / 100;
-            const taxTotal = Math.round(finalTaxable * (gstRate / 100) * 100) / 100;
+            const orderId = rawOrderId || `TCS-ORD-${sIdx}-${idx}`;
+
+            const igstFromRow = parseNumber(getValueFromRow(row, igstAliases));
+            const cgstFromRow = parseNumber(getValueFromRow(row, cgstAliases));
+            const sgstFromRow = parseNumber(getValueFromRow(row, sgstAliases));
+
+            const hasRowTax = Math.abs(igstFromRow) > 0.001 || Math.abs(cgstFromRow) > 0.001 || Math.abs(sgstFromRow) > 0.001;
+
+            let igstAmount = 0;
+            let cgstAmount = 0;
+            let sgstAmount = 0;
+
+            if (hasRowTax) {
+              igstAmount = Math.abs(igstFromRow);
+              cgstAmount = Math.abs(cgstFromRow);
+              sgstAmount = Math.abs(sgstFromRow);
+            } else {
+              const taxTotal = finalTaxable * (gstRate / 100);
+              if (isInterState) {
+                igstAmount = taxTotal;
+              } else {
+                cgstAmount = taxTotal / 2;
+                sgstAmount = taxTotal / 2;
+              }
+            }
+
+            const tcsTotal = finalTaxable * 0.01;
 
             salesTransactions.push({
-              id: `tcs-s-${idx}-${Date.now()}`,
+              id: `tcs-s-${sIdx}-${idx}-${Date.now()}`,
               orderId,
               subOrderId: orderId,
               orderDate: dateStr,
@@ -190,22 +217,23 @@ export async function parseMeeshoExcelFiles(
               isInterState,
               hsnCode: '6109',
               quantity: 1,
-              grossAmount: Math.round((finalTaxable + taxTotal) * 100) / 100,
+              grossAmount: finalTaxable + igstAmount + cgstAmount + sgstAmount,
               taxableValue: finalTaxable,
               gstRate,
-              igstAmount: isInterState ? taxTotal : 0,
-              cgstAmount: !isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0,
-              sgstAmount: !isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0,
+              igstAmount,
+              cgstAmount,
+              sgstAmount,
               tcsIgst: isInterState ? tcsTotal : 0,
-              tcsCgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
-              tcsSgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
+              tcsCgst: !isInterState ? tcsTotal / 2 : 0,
+              tcsSgst: !isInterState ? tcsTotal / 2 : 0,
               totalTcs: tcsTotal,
               sourceFile: files.tcsSales?.name || 'tcs_sales.xlsx',
-              sourceRow: idx + (bestSheet.headerRowIndex !== undefined ? bestSheet.headerRowIndex + 2 : 2)
+              sourceSheet: sheetAnalysis.sheetName,
+              sourceRow: idx + (sheetAnalysis.headerRowIndex !== undefined ? sheetAnalysis.headerRowIndex + 2 : 2)
             });
           }
         });
-      }
+      });
     } catch (err) {
       console.error('Error parsing TCS Sales file:', err);
     }
@@ -216,55 +244,52 @@ export async function parseMeeshoExcelFiles(
     try {
       const data = await files.tcsSalesReturn.arrayBuffer();
       const workbook = XLSX.read(data, { type: 'array' });
-      const bestSheet = getBestSheetAnalysis(workbook);
+      const sheets = getAllSheetsAnalysis(workbook);
 
-      if (bestSheet && bestSheet.rows.length > 0) {
-        tcsSalesReturnRowsCount = bestSheet.rows.length;
-        bestSheet.rows.forEach((row, idx) => {
-          const orderId = String(
-            getValueFromRow(row, ['sub order no', 'return order id', 'sub order', 'suborder id', 'order id', 'order no', 'id']) || `RET-ORD-${idx}`
-          ).trim();
-
-          const posStateRaw = String(
-            getValueFromRow(row, ['customer state', 'delivery state', 'state', 'place of supply', 'pos', 'state name']) || 'Delhi'
-          ).trim();
-
-          const taxableVal = Math.abs(
-            parseNumber(
-              getValueFromRow(row, [
-                'total_taxable_sale_value',
-                'total taxable sale value',
-                'total taxable value',
-                'return taxable value',
-                'taxable return value',
-                'taxable value',
-                'return amount',
-                'total return value',
-                'net return amount',
-                'refund amount',
-                'gross return',
-                'amount',
-                'value'
-              ])
-            )
-          );
-
-          const gstRateRaw = String(getValueFromRow(row, ['gst rate', 'tax rate', 'rate', 'gst %']) || '5');
+      sheets.forEach((sheetAnalysis, sIdx) => {
+        sheetAnalysis.rows.forEach((row, idx) => {
+          const rawOrderId = String(getValueFromRow(row, orderIdAliases) || '').trim();
+          const posStateRaw = String(getValueFromRow(row, stateAliases) || 'Delhi').trim();
+          const taxableVal = parseNumber(getValueFromRow(row, returnTaxableAliases));
+          const gstRateRaw = String(getValueFromRow(row, gstRateAliases) || '5');
           const gstRate = parseNumber(gstRateRaw) || 5;
-
-          const dateStr = String(
-            getValueFromRow(row, ['return date', 'order date', 'date', 'transaction date']) || new Date().toISOString().split('T')[0]
-          ).trim();
+          const dateStr = String(getValueFromRow(row, dateAliases) || new Date().toISOString().split('T')[0]).trim();
 
           const { stateCode, stateName } = resolveIndianState(posStateRaw);
           const isInterState = stateCode !== sellerStateCode;
 
-          if (orderId || taxableVal > 0) {
-            const tcsTotal = Math.round(taxableVal * 0.01 * 100) / 100;
-            const taxTotal = Math.round(taxableVal * (gstRate / 100) * 100) / 100;
+          if (rawOrderId || taxableVal !== 0) {
+            const finalTaxable = Math.abs(taxableVal);
+            const orderId = rawOrderId || `RET-ORD-${sIdx}-${idx}`;
+
+            const igstFromRow = parseNumber(getValueFromRow(row, igstAliases));
+            const cgstFromRow = parseNumber(getValueFromRow(row, cgstAliases));
+            const sgstFromRow = parseNumber(getValueFromRow(row, sgstAliases));
+
+            const hasRowTax = Math.abs(igstFromRow) > 0.001 || Math.abs(cgstFromRow) > 0.001 || Math.abs(sgstFromRow) > 0.001;
+
+            let igstAmount = 0;
+            let cgstAmount = 0;
+            let sgstAmount = 0;
+
+            if (hasRowTax) {
+              igstAmount = Math.abs(igstFromRow);
+              cgstAmount = Math.abs(cgstFromRow);
+              sgstAmount = Math.abs(sgstFromRow);
+            } else {
+              const taxTotal = finalTaxable * (gstRate / 100);
+              if (isInterState) {
+                igstAmount = taxTotal;
+              } else {
+                cgstAmount = taxTotal / 2;
+                sgstAmount = taxTotal / 2;
+              }
+            }
+
+            const tcsTotal = finalTaxable * 0.01;
 
             returnTransactions.push({
-              id: `tcs-r-${idx}-${Date.now()}`,
+              id: `tcs-r-${sIdx}-${idx}-${Date.now()}`,
               orderId,
               subOrderId: orderId,
               orderDate: dateStr,
@@ -275,22 +300,24 @@ export async function parseMeeshoExcelFiles(
               isInterState,
               hsnCode: '6109',
               quantity: 1,
-              grossAmount: Math.round((taxableVal + taxTotal) * 100) / 100,
-              taxableValue: taxableVal,
+              grossAmount: finalTaxable + igstAmount + cgstAmount + sgstAmount,
+              taxableValue: finalTaxable,
               gstRate,
-              igstAmount: isInterState ? taxTotal : 0,
-              cgstAmount: !isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0,
-              sgstAmount: !isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0,
+              igstAmount,
+              cgstAmount,
+              sgstAmount,
               tcsIgst: isInterState ? tcsTotal : 0,
-              tcsCgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
-              tcsSgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
+              tcsCgst: !isInterState ? tcsTotal / 2 : 0,
+              tcsSgst: !isInterState ? tcsTotal / 2 : 0,
               totalTcs: tcsTotal,
               sourceFile: files.tcsSalesReturn?.name || 'tcs_sales_return.xlsx',
-              sourceRow: idx + (bestSheet.headerRowIndex !== undefined ? bestSheet.headerRowIndex + 2 : 2)
+              sourceSheet: sheetAnalysis.sheetName,
+              returnCategory: sheetAnalysis.sheetName,
+              sourceRow: idx + (sheetAnalysis.headerRowIndex !== undefined ? sheetAnalysis.headerRowIndex + 2 : 2)
             });
           }
         });
-      }
+      });
     } catch (err) {
       console.error('Error parsing TCS Sales Return file:', err);
     }
@@ -301,26 +328,22 @@ export async function parseMeeshoExcelFiles(
     try {
       const data = await files.taxInvoice.arrayBuffer();
       const workbook = XLSX.read(data, { type: 'array' });
-      const bestSheet = getBestSheetAnalysis(workbook);
+      const sheets = getAllSheetsAnalysis(workbook);
 
-      if (bestSheet && bestSheet.rows.length > 0) {
-        taxInvoiceRowsCount = bestSheet.rows.length;
-
-        // If TCS Sales were already parsed, enrich existing sales transactions with HSN / tax details from Tax Invoice Details
-        if (salesTransactions.length > 0) {
-          bestSheet.rows.forEach((row) => {
-            const subOrderId = String(
-              getValueFromRow(row, ['sub order no', 'sub order', 'suborder id', 'order id', 'order no'])
-            ).trim();
-
-            const hsnCode = String(getValueFromRow(row, ['hsn code', 'hsn', 'sac'])).trim();
-            const gstRate = parseNumber(getValueFromRow(row, ['gst rate', 'tax rate', 'rate', 'gst %']));
-            const igst = parseNumber(getValueFromRow(row, ['igst amount', 'igst']));
-            const cgst = parseNumber(getValueFromRow(row, ['cgst amount', 'cgst']));
-            const sgst = parseNumber(getValueFromRow(row, ['sgst amount', 'sgst']));
+      if (salesTransactions.length > 0 || returnTransactions.length > 0) {
+        sheets.forEach((sheetAnalysis) => {
+          sheetAnalysis.rows.forEach((row) => {
+            const subOrderId = String(getValueFromRow(row, orderIdAliases)).trim();
+            const hsnCode = String(getValueFromRow(row, ['hsn code', 'hsn', 'sac', 'hsn_code'])).trim();
+            const gstRate = parseNumber(getValueFromRow(row, gstRateAliases));
+            const igst = parseNumber(getValueFromRow(row, igstAliases));
+            const cgst = parseNumber(getValueFromRow(row, cgstAliases));
+            const sgst = parseNumber(getValueFromRow(row, sgstAliases));
 
             if (subOrderId) {
               const match = salesTransactions.find(
+                (t) => t.subOrderId === subOrderId || t.orderId === subOrderId
+              ) || returnTransactions.find(
                 (t) => t.subOrderId === subOrderId || t.orderId === subOrderId
               );
               if (match) {
@@ -332,49 +355,35 @@ export async function parseMeeshoExcelFiles(
               }
             }
           });
-        } else {
-          // If TCS Sales file was absent, use Tax Invoice Details directly as sales source
-          bestSheet.rows.forEach((row, idx) => {
-            const orderId = String(
-              getValueFromRow(row, ['sub order no', 'sub order', 'suborder id', 'order id', 'id']) || `ORD-TX-${idx}`
-            ).trim();
-
-            const subOrderId = String(
-              getValueFromRow(row, ['sub order no', 'suborder id', 'sub order']) || orderId
-            ).trim();
-
-            const posStateRaw = String(
-              getValueFromRow(row, ['customer state', 'delivery state', 'state', 'place of supply', 'pos']) || 'Delhi'
-            ).trim();
-
+        });
+      } else {
+        // Fallback when TCS Sales/Return files are missing
+        sheets.forEach((sheetAnalysis, sIdx) => {
+          sheetAnalysis.rows.forEach((row, idx) => {
+            const rawOrderId = String(getValueFromRow(row, orderIdAliases) || '').trim();
+            const posStateRaw = String(getValueFromRow(row, stateAliases) || 'Delhi').trim();
             const hsnCode = String(getValueFromRow(row, ['hsn code', 'hsn', 'sac']) || '6109').trim();
             const qty = parseNumber(getValueFromRow(row, ['quantity', 'qty', 'units'])) || 1;
-
-            const taxableVal = parseNumber(
-              getValueFromRow(row, ['total_taxable_sale_value', 'taxable value', 'taxable amount', 'net amount', 'sales amount', 'total taxable amount', 'amount', 'value'])
-            );
-
-            const gstRate = parseNumber(getValueFromRow(row, ['gst rate', 'tax rate', 'rate', 'gst %'])) || 5;
-            const igst = parseNumber(getValueFromRow(row, ['igst amount', 'igst']));
-            const cgst = parseNumber(getValueFromRow(row, ['cgst amount', 'cgst']));
-            const sgst = parseNumber(getValueFromRow(row, ['sgst amount', 'sgst']));
-
-            const invoiceDate = String(
-              getValueFromRow(row, ['invoice date', 'order date', 'date']) || new Date().toISOString().split('T')[0]
-            ).trim();
+            const taxableVal = parseNumber(getValueFromRow(row, salesTaxableAliases));
+            const gstRate = parseNumber(getValueFromRow(row, gstRateAliases)) || 5;
+            const igst = parseNumber(getValueFromRow(row, igstAliases));
+            const cgst = parseNumber(getValueFromRow(row, cgstAliases));
+            const sgst = parseNumber(getValueFromRow(row, sgstAliases));
+            const invoiceDate = String(getValueFromRow(row, dateAliases) || new Date().toISOString().split('T')[0]).trim();
 
             const { stateCode, stateName } = resolveIndianState(posStateRaw);
             const isInterState = stateCode !== sellerStateCode;
 
-            if (orderId || taxableVal > 0) {
+            if (rawOrderId || taxableVal !== 0) {
               const finalTaxable = Math.abs(taxableVal);
-              const tcsTotal = Math.round(finalTaxable * 0.01 * 100) / 100;
-              const taxTotal = igst || (cgst + sgst) || Math.round(finalTaxable * (gstRate / 100) * 100) / 100;
+              const orderId = rawOrderId || `ORD-TX-${sIdx}-${idx}`;
+              const tcsTotal = finalTaxable * 0.01;
+              const taxTotal = igst || (cgst + sgst) || (finalTaxable * (gstRate / 100));
 
               salesTransactions.push({
-                id: `tx-inv-${idx}-${Date.now()}`,
+                id: `tx-inv-${sIdx}-${idx}-${Date.now()}`,
                 orderId,
-                subOrderId,
+                subOrderId: orderId,
                 orderDate: invoiceDate,
                 invoiceDate,
                 type: 'Sales',
@@ -383,22 +392,23 @@ export async function parseMeeshoExcelFiles(
                 isInterState,
                 hsnCode,
                 quantity: qty,
-                grossAmount: Math.round((finalTaxable + taxTotal) * 100) / 100,
+                grossAmount: finalTaxable + taxTotal,
                 taxableValue: finalTaxable,
                 gstRate,
                 igstAmount: igst || (isInterState ? taxTotal : 0),
-                cgstAmount: cgst || (!isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0),
-                sgstAmount: sgst || (!isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0),
+                cgstAmount: cgst || (!isInterState ? taxTotal / 2 : 0),
+                sgstAmount: sgst || (!isInterState ? taxTotal / 2 : 0),
                 tcsIgst: isInterState ? tcsTotal : 0,
-                tcsCgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
-                tcsSgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
+                tcsCgst: !isInterState ? tcsTotal / 2 : 0,
+                tcsSgst: !isInterState ? tcsTotal / 2 : 0,
                 totalTcs: tcsTotal,
                 sourceFile: files.taxInvoice?.name || 'Tax_invoice_details.xlsx',
-                sourceRow: idx + (bestSheet.headerRowIndex !== undefined ? bestSheet.headerRowIndex + 2 : 2)
+                sourceSheet: sheetAnalysis.sheetName,
+                sourceRow: idx + (sheetAnalysis.headerRowIndex !== undefined ? sheetAnalysis.headerRowIndex + 2 : 2)
               });
             }
           });
-        }
+        });
       }
     } catch (err) {
       console.error('Error parsing Tax Invoice details file:', err);
@@ -408,82 +418,109 @@ export async function parseMeeshoExcelFiles(
   const allTransactions = [...salesTransactions, ...returnTransactions];
   const summary = calculateMeeshoImportSummary(allTransactions);
 
-  // Developer summary log as requested in Step 14 & instructions
   console.log('====================================');
   console.log('MEESHO IMPORT SUMMARY');
-  console.log('');
   console.log(`TCS Sales Records: ${summary.salesRecordsCount}`);
   console.log(`TCS Sales Taxable Value: ${summary.salesTaxableValue}`);
-  console.log('');
   console.log(`TCS Sales Return Records: ${summary.returnsRecordsCount}`);
   console.log(`TCS Sales Return Taxable Value: ${summary.returnsTaxableValue}`);
-  console.log('');
   console.log(`Success Records: ${summary.successRecords}`);
-  console.log('');
   console.log(`Net Sale: ${summary.netSale}`);
   console.log('====================================');
 
   return allTransactions;
 }
 
+interface StateMapEntry {
+  code: string;
+  name: string;
+  aliases: string[];
+}
+
+const INDIAN_STATES: StateMapEntry[] = [
+  { code: '01', name: 'Jammu & Kashmir', aliases: ['jammu', 'kashmir', 'j&k', 'jk'] },
+  { code: '02', name: 'Himachal Pradesh', aliases: ['himachal', 'hp'] },
+  { code: '03', name: 'Punjab', aliases: ['punjab', 'pb'] },
+  { code: '04', name: 'Chandigarh', aliases: ['chandigarh', 'ch'] },
+  { code: '05', name: 'Uttarakhand', aliases: ['uttarakhand', 'uttaranchal', 'uk', 'ua'] },
+  { code: '06', name: 'Haryana', aliases: ['haryana', 'hr'] },
+  { code: '07', name: 'Delhi', aliases: ['delhi', 'dl', 'nct', 'new delhi'] },
+  { code: '08', name: 'Rajasthan', aliases: ['rajasthan', 'rj'] },
+  { code: '09', name: 'Uttar Pradesh', aliases: ['uttar pradesh', 'up'] },
+  { code: '10', name: 'Bihar', aliases: ['bihar', 'br'] },
+  { code: '11', name: 'Sikkim', aliases: ['sikkim', 'sk'] },
+  { code: '12', name: 'Arunachal Pradesh', aliases: ['arunachal', 'ar'] },
+  { code: '13', name: 'Nagaland', aliases: ['nagaland', 'nl'] },
+  { code: '14', name: 'Manipur', aliases: ['manipur', 'mn'] },
+  { code: '15', name: 'Mizoram', aliases: ['mizoram', 'mz'] },
+  { code: '16', name: 'Tripura', aliases: ['tripura', 'tr'] },
+  { code: '17', name: 'Meghalaya', aliases: ['meghalaya', 'ml'] },
+  { code: '18', name: 'Assam', aliases: ['assam', 'as'] },
+  { code: '19', name: 'West Bengal', aliases: ['west bengal', 'wb', 'bengal'] },
+  { code: '20', name: 'Jharkhand', aliases: ['jharkhand', 'jh'] },
+  { code: '21', name: 'Odisha', aliases: ['odisha', 'orissa', 'od', 'or'] },
+  { code: '22', name: 'Chhattisgarh', aliases: ['chhattisgarh', 'chhatisgarh', 'cg', 'ct'] },
+  { code: '23', name: 'Madhya Pradesh', aliases: ['madhya pradesh', 'mp'] },
+  { code: '24', name: 'Gujarat', aliases: ['gujarat', 'gj'] },
+  { code: '26', name: 'Dadra and Nagar Haveli and Daman and Diu', aliases: ['daman', 'diu', 'dadra', 'nagar haveli', 'dnh', 'dd', 'dn'] },
+  { code: '27', name: 'Maharashtra', aliases: ['maharashtra', 'mh'] },
+  { code: '29', name: 'Karnataka', aliases: ['karnataka', 'ka'] },
+  { code: '30', name: 'Goa', aliases: ['goa', 'ga'] },
+  { code: '31', name: 'Lakshadweep', aliases: ['lakshadweep', 'ld'] },
+  { code: '32', name: 'Kerala', aliases: ['kerala', 'kl'] },
+  { code: '33', name: 'Tamil Nadu', aliases: ['tamil nadu', 'tamilnadu', 'tn'] },
+  { code: '34', name: 'Puducherry', aliases: ['puducherry', 'pondicherry', 'py'] },
+  { code: '35', name: 'Andaman and Nicobar Islands', aliases: ['andaman', 'nicobar', 'a&n', 'an'] },
+  { code: '36', name: 'Telangana', aliases: ['telangana', 'ts', 'tg'] },
+  { code: '37', name: 'Andhra Pradesh', aliases: ['andhra pradesh', 'andhra', 'ap'] },
+  { code: '38', name: 'Ladakh', aliases: ['ladakh', 'la'] }
+];
+
 export function resolveIndianState(stateInput: string): { stateCode: string; stateName: string } {
-  const clean = stateInput.trim().toLowerCase();
+  if (!stateInput) return { stateCode: '07', stateName: 'Delhi' };
+  const raw = String(stateInput).trim();
+  const clean = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  const stateMap: Record<string, { code: string; name: string }> = {
-    'jammu and kashmir': { code: '01', name: 'Jammu & Kashmir' },
-    'himachal pradesh': { code: '02', name: 'Himachal Pradesh' },
-    'punjab': { code: '03', name: 'Punjab' },
-    'chandigarh': { code: '04', name: 'Chandigarh' },
-    'uttarakhand': { code: '05', name: 'Uttarakhand' },
-    'haryana': { code: '06', name: 'Haryana' },
-    'delhi': { code: '07', name: 'Delhi' },
-    'rajasthan': { code: '08', name: 'Rajasthan' },
-    'uttar pradesh': { code: '09', name: 'Uttar Pradesh' },
-    'up': { code: '09', name: 'Uttar Pradesh' },
-    'bihar': { code: '10', name: 'Bihar' },
-    'sikkim': { code: '11', name: 'Sikkim' },
-    'arunachal pradesh': { code: '12', name: 'Arunachal Pradesh' },
-    'nagaland': { code: '13', name: 'Nagaland' },
-    'manipur': { code: '14', name: 'Manipur' },
-    'mizoram': { code: '15', name: 'Mizoram' },
-    'tripura': { code: '16', name: 'Tripura' },
-    'meghalaya': { code: '17', name: 'Meghalaya' },
-    'assam': { code: '18', name: 'Assam' },
-    'west bengal': { code: '19', name: 'West Bengal' },
-    'wb': { code: '19', name: 'West Bengal' },
-    'jharkhand': { code: '20', name: 'Jharkhand' },
-    'odisha': { code: '21', name: 'Odisha' },
-    'chhattisgarh': { code: '22', name: 'Chhattisgarh' },
-    'madhya pradesh': { code: '23', name: 'Madhya Pradesh' },
-    'mp': { code: '23', name: 'Madhya Pradesh' },
-    'gujarat': { code: '24', name: 'Gujarat' },
-    'daman and diu': { code: '26', name: 'Dadra and Nagar Haveli and Daman and Diu' },
-    'maharashtra': { code: '27', name: 'Maharashtra' },
-    'andhra pradesh': { code: '37', name: 'Andhra Pradesh' },
-    'karnataka': { code: '29', name: 'Karnataka' },
-    'goa': { code: '30', name: 'Goa' },
-    'lakshadweep': { code: '31', name: 'Lakshadweep' },
-    'kerala': { code: '32', name: 'Kerala' },
-    'tamil nadu': { code: '33', name: 'Tamil Nadu' },
-    'tn': { code: '33', name: 'Tamil Nadu' },
-    'puducherry': { code: '34', name: 'Puducherry' },
-    'telangana': { code: '36', name: 'Telangana' }
-  };
-
-  for (const [key, val] of Object.entries(stateMap)) {
-    if (clean.includes(key)) {
-      return { stateCode: val.code, stateName: val.name };
-    }
-  }
-
-  const codeMatch = clean.match(/^(\d{2})/);
+  // 1. Code match: search for 2-digit state code anywhere in input
+  const codeMatch = raw.match(/\b(0[1-9]|[1-3][0-8])\b/) || raw.match(/^(\d{2})/);
   if (codeMatch) {
     const code = codeMatch[1];
-    const match = Object.values(stateMap).find((s) => s.code === code);
+    const match = INDIAN_STATES.find((s) => s.code === code);
     if (match) return { stateCode: match.code, stateName: match.name };
   }
 
-  return { stateCode: '07', stateName: stateInput || 'Delhi' };
+  // 2. Exact match on clean name
+  for (const s of INDIAN_STATES) {
+    if (s.name.toLowerCase().replace(/[^a-z0-9]/g, '') === clean) {
+      return { stateCode: s.code, stateName: s.name };
+    }
+  }
+
+  // 3. Match full name or longer aliases (> 2 chars) contained in clean input
+  for (const s of INDIAN_STATES) {
+    const cleanName = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (clean.includes(cleanName)) {
+      return { stateCode: s.code, stateName: s.name };
+    }
+    for (const alias of s.aliases) {
+      const cleanAlias = alias.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (cleanAlias.length > 2 && clean.includes(cleanAlias)) {
+        return { stateCode: s.code, stateName: s.name };
+      }
+    }
+  }
+
+  // 4. Standalone short alias match (<= 2 chars) using word boundary
+  const words = raw.toLowerCase().split(/[^a-z0-9]+/);
+  for (const s of INDIAN_STATES) {
+    for (const alias of s.aliases) {
+      if (alias.length <= 2 && words.includes(alias.toLowerCase())) {
+        return { stateCode: s.code, stateName: s.name };
+      }
+    }
+  }
+
+  return { stateCode: '07', stateName: raw || 'Delhi' };
 }
 
 export interface ManageDataSummary {

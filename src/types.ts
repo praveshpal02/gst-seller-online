@@ -54,15 +54,17 @@ export interface MeeshoTransaction {
   tcsSgst: number;
   totalTcs: number;
   sourceFile: string;
+  sourceSheet?: string;
   sourceRow?: number | string;
   invoiceNumber?: string;
   customerGstin?: string;
+  returnCategory?: string;
 }
 
 export interface StateGSTR1Summary {
   stateCode: string;
   stateName: string;
-  type: 'OE' | 'E'; // Other Than E-Commerce vs E-Commerce
+  type: 'OE' | 'E' | 'INTRA' | 'INTER'; // Supply type or E-Commerce flag
   gstRate: number;
   taxableValue: number;
   igstAmount: number;
@@ -121,11 +123,25 @@ export interface ManualGSTR1Entry {
   notes?: string;
 }
 
+export interface DocumentCategorySummary {
+  docNum: number;
+  docType: string; // e.g. "Invoices for outward supply" or "Credit Note"
+  from?: string;
+  to?: string;
+  totalCount: number;
+  cancelledCount: number;
+  netIssuedCount: number;
+  sourceSheet?: string;
+}
+
 export interface DocumentsIssuedSummary {
   recordCount: number;
+  totalInvoices: number;
+  totalCreditNotes: number;
   totalDocs: number;
   cancelledDocs: number;
   netIssuedDocs: number;
+  categories?: DocumentCategorySummary[];
 }
 
 export interface EcommerceOperatorSummary {
@@ -137,6 +153,25 @@ export interface EcommerceOperatorSummary {
   cgstAmount: number;
   sgstAmount: number;
   totalTax: number;
+}
+
+export interface ReconciliationStatus {
+  isReconciled: boolean;
+  errors: string[];
+  warnings: string[];
+  details: {
+    sourceNetTaxable: number;
+    b2csTaxable: number;
+    ecoTaxable: number;
+    hsnTaxable: number;
+    b2csTotalTax: number;
+    ecoTotalTax: number;
+    hsnTotalTax: number;
+    sourceSalesCount: number;
+    sourceReturnsCount: number;
+    docTotalInvoices: number;
+    docTotalCreditNotes: number;
+  };
 }
 
 export interface GSTR1CompleteReport {
@@ -151,5 +186,6 @@ export interface GSTR1CompleteReport {
   docIssue: DocumentsIssuedSummary;
   ecoSummary: EcommerceOperatorSummary[];
   hsnList: HSNSummary[];
+  reconciliation?: ReconciliationStatus;
 }
 
