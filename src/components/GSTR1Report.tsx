@@ -187,10 +187,10 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
         clttx: [
           {
             etin: operatorGstin || '07AARCM9332R1CQ',
-            suppval: Number(report.ecoSummary[0]?.netTaxableValue.toFixed(2) || 0),
-            igst: Number(report.ecoSummary[0]?.igstAmount.toFixed(2) || 0),
-            cgst: Number(report.ecoSummary[0]?.cgstAmount.toFixed(2) || 0),
-            sgst: Number(report.ecoSummary[0]?.sgstAmount.toFixed(2) || 0),
+            suppval: Number((report.ecoSummary[0]?.netTaxableValue || 0).toFixed(2)),
+            igst: Number((report.ecoSummary[0]?.igstAmount || 0).toFixed(2)),
+            cgst: Number((report.ecoSummary[0]?.cgstAmount || 0).toFixed(2)),
+            sgst: Number((report.ecoSummary[0]?.sgstAmount || 0).toFixed(2)),
             cess: 0
           }
         ]
@@ -201,33 +201,45 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
             ? report.docIssue.categories.map((cat, idx) => ({
                 doc_num: idx + 1,
                 doc_typ: cat.docType,
-                num: idx + 1,
-                from: cat.from || '1',
-                to: cat.to || String(cat.totalCount),
-                totnum: cat.totalCount,
-                cancel: cat.cancelledCount,
-                net_issue: cat.netIssuedCount
+                docs: [
+                  {
+                    num: 1,
+                    from: cat.from || '1',
+                    to: cat.to || String(cat.totalCount),
+                    totnum: cat.totalCount,
+                    cancel: cat.cancelledCount,
+                    net_issue: cat.netIssuedCount
+                  }
+                ]
               }))
             : [
                 {
                   doc_num: 1,
                   doc_typ: 'Invoices for outward supply',
-                  num: 1,
-                  from: '1',
-                  to: String(report.docIssue.totalInvoices),
-                  totnum: report.docIssue.totalInvoices,
-                  cancel: report.docIssue.cancelledDocs,
-                  net_issue: report.docIssue.totalInvoices - report.docIssue.cancelledDocs
+                  docs: [
+                    {
+                      num: 1,
+                      from: '1',
+                      to: String(report.docIssue.totalInvoices),
+                      totnum: report.docIssue.totalInvoices,
+                      cancel: report.docIssue.cancelledDocs,
+                      net_issue: report.docIssue.totalInvoices - report.docIssue.cancelledDocs
+                    }
+                  ]
                 },
                 {
                   doc_num: 2,
                   doc_typ: 'Credit Note',
-                  num: 2,
-                  from: '1',
-                  to: String(report.docIssue.totalCreditNotes),
-                  totnum: report.docIssue.totalCreditNotes,
-                  cancel: 0,
-                  net_issue: report.docIssue.totalCreditNotes
+                  docs: [
+                    {
+                      num: 1,
+                      from: '1',
+                      to: String(report.docIssue.totalCreditNotes),
+                      totnum: report.docIssue.totalCreditNotes,
+                      cancel: 0,
+                      net_issue: report.docIssue.totalCreditNotes
+                    }
+                  ]
                 }
               ]
       },
@@ -251,6 +263,14 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
           }
         : {})
     };
+
+    console.log('[JSON EXPORT EXECUTED] src/components/GSTR1Report.tsx -> handleExportJSON');
+    console.log('Filing Period:', fpStr);
+    console.log('GSTIN:', payload.gstin);
+    console.log('gt / cur_gt:', payload.gt);
+    console.log('b2cs records count in JSON:', payload.b2cs.length);
+    console.log('doc_issue categories count in JSON:', payload.doc_issue.doc_det.length);
+    console.log('doc_issue details:', JSON.stringify(payload.doc_issue.doc_det, null, 2));
 
     const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(payload, null, 2));
     const downloadAnchor = document.createElement('a');

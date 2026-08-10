@@ -574,6 +574,13 @@ export function calculateGstr1Summary(
     }
   };
 
+  console.log('[CALCULATOR EXECUTED] src/utils/gstr1Calculator.ts -> calculateGstr1Summary');
+  console.log(`Input Transaction Records: ${records.length}`);
+  console.log(`Calculated B2CS Record Groups: ${b2csList.length}`);
+  console.log(`B2CS Total Taxable Value: ₹${totalTaxable}`);
+  console.log(`Total Documents Count: ${docIssue.totalDocs} (Invoices: ${docIssue.totalInvoices}, Credit Notes: ${docIssue.totalCreditNotes})`);
+  console.log('Document Categories Ranges:', docIssue.categories.map(c => ({ docType: c.docType, from: c.from, to: c.to, totalCount: c.totalCount })));
+
   return {
     recordCount: records.length,
     totalTaxable,
