@@ -57,6 +57,7 @@ export interface MeeshoTransaction {
   sourceSheet?: string;
   sourceRow?: number | string;
   invoiceNumber?: string;
+  isCancelled?: boolean;
   customerGstin?: string;
   returnCategory?: string;
 }
@@ -188,4 +189,3 @@ export interface GSTR1CompleteReport {
   hsnList: HSNSummary[];
   reconciliation?: ReconciliationStatus;
 }
-

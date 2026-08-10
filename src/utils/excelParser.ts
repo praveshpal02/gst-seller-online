@@ -11,11 +11,30 @@ export interface UploadedFilesMap {
 const ID_KEY_PATTERNS = [
   'order', 'suborder', 'creditnote', 'invoiceno', 'invoicenumber',
   'invoiceid', 'taxinvoiceno', 'gstin', 'arn', 'irn', 'tracking',
-  'shipment', 'sku', 'date', 'state', 'customer', 'supplier', 'document'
+  'shipment', 'sku', 'date', 'state', 'customer', 'supplier', 'document',
+  'reference', 'awb', 'trackingnumber'
 ];
 
+const NUMERIC_IDENTIFIER_EXACT = new Set([
+  'id', 'orderno', 'ordernumber', 'orderid', 'suborderno', 'subordernumber',
+  'suborderid', 'creditnoteno', 'creditnotenumber', 'invoiceno',
+  'invoicenumber', 'invoiceid', 'taxinvoiceno', 'taxinvoicenumber',
+  'awb', 'awbno', 'trackingno', 'trackingnumber', 'documentno', 'documentnumber'
+]);
+
+function normalizeKey(value: string): string {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 function isIdKey(keyClean: string): boolean {
+  if (NUMERIC_IDENTIFIER_EXACT.has(keyClean)) return true;
   return ID_KEY_PATTERNS.some((p) => keyClean.includes(p));
+}
+
+function isNumericIdentifierHeader(rawKey: string): boolean {
+  const clean = normalizeKey(rawKey);
+  if (NUMERIC_IDENTIFIER_EXACT.has(clean)) return true;
+  return /^(?:creditnote|suborder|order|invoice|taxinvoice|document)(?:no|number|id|ref|reference)$/.test(clean);
 }
 
 /**
@@ -43,41 +62,43 @@ export function parseNumber(val: any): number {
  */
 function getValueFromRow(row: Record<string, any>, aliases: string[], isNumericField = false): any {
   if (!row) return '';
+
   const keys = Object.keys(row);
+  const candidates: Array<{ value: any; score: number; key: string }> = [];
 
-  // 1. First pass: exact clean key match
-  for (const alias of aliases) {
-    const aliasClean = alias.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!aliasClean) continue;
-    for (const key of keys) {
-      const keyClean = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (const key of keys) {
+    const keyClean = normalizeKey(key);
+    if (!keyClean) continue;
+
+    if (isNumericField && (isIdKey(keyClean) || isNumericIdentifierHeader(key))) continue;
+
+    for (const alias of aliases) {
+      const aliasClean = normalizeKey(alias);
+      if (!aliasClean) continue;
+
+      let score = -1;
       if (keyClean === aliasClean) {
-        if (isNumericField && isIdKey(keyClean)) continue; // skip identifier keys when looking for numbers
+        score = 10000 + aliasClean.length;
+      } else if (keyClean.startsWith(aliasClean) && aliasClean.length >= 5) {
+        score = 7000 + aliasClean.length;
+      } else if (keyClean.endsWith(aliasClean) && aliasClean.length >= 5) {
+        score = 6500 + aliasClean.length;
+      } else if (keyClean.includes(aliasClean) && aliasClean.length >= 5) {
+        score = 5000 + aliasClean.length;
+      }
+
+      if (score >= 0) {
         const val = row[key];
         if (val !== undefined && val !== null && String(val).trim() !== '') {
-          return val;
+          candidates.push({ value: val, score, key });
         }
       }
     }
   }
 
-  // 2. Second pass: partial clean key match (.includes)
-  for (const alias of aliases) {
-    const aliasClean = alias.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!aliasClean || aliasClean.length < 3) continue;
-    for (const key of keys) {
-      const keyClean = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (isNumericField && isIdKey(keyClean)) continue; // skip identifier keys when looking for numbers
-      if (keyClean.includes(aliasClean)) {
-        const val = row[key];
-        if (val !== undefined && val !== null && String(val).trim() !== '') {
-          return val;
-        }
-      }
-    }
-  }
-
-  return '';
+  if (candidates.length === 0) return '';
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].value;
 }
 
 export function getAllSheetsAnalysis(workbook: XLSX.WorkBook): SheetHeaderAnalysis[] {
@@ -175,6 +196,15 @@ export async function parseMeeshoExcelFiles(
   const cgstAliases = ['cgst amount', 'cgst', 'central tax amount', 'central tax'];
   const sgstAliases = ['sgst amount', 'sgst', 'state tax amount', 'state tax', 'utgst amount', 'utgst'];
   const dateAliases = ['order date', 'return date', 'invoice date', 'credit note date', 'transaction date', 'date'];
+  const invoiceNumberAliases = [
+    'invoice number', 'invoice no', 'invoice #', 'tax invoice number', 'tax invoice no',
+    'invoice id', 'document number', 'document no', 'original invoice number'
+  ];
+  const creditNoteNumberAliases = [
+    'credit note number', 'credit note no', 'credit note #', 'credit note id',
+    'creditnote number', 'creditnote no', 'document number', 'document no'
+  ];
+  const statusAliases = ['status', 'document status', 'invoice status', 'credit note status', 'cancel status', 'cancellation status'];
 
   // 1. Process TCS Sales File
   if (files.tcsSales) {
@@ -238,6 +268,8 @@ export async function parseMeeshoExcelFiles(
               subOrderId: orderId,
               orderDate: dateStr,
               invoiceDate: dateStr,
+              invoiceNumber: String(getValueFromRow(row, invoiceNumberAliases) || '').trim() || undefined,
+              isCancelled: /cancel|cancelled|canceled/i.test(String(getValueFromRow(row, statusAliases) || '')),
               type: 'Sales',
               posStateCode: stateCode,
               posStateName: stateName,
@@ -326,6 +358,8 @@ export async function parseMeeshoExcelFiles(
               subOrderId: orderId,
               orderDate: dateStr,
               invoiceDate: dateStr,
+              invoiceNumber: String(getValueFromRow(row, creditNoteNumberAliases) || '').trim() || undefined,
+              isCancelled: /cancel|cancelled|canceled/i.test(String(getValueFromRow(row, statusAliases) || '')),
               type: 'Return',
               posStateCode: stateCode,
               posStateName: stateName,
@@ -425,6 +459,8 @@ export async function parseMeeshoExcelFiles(
                 subOrderId: orderId,
                 orderDate: invoiceDate,
                 invoiceDate,
+                invoiceNumber: String(getValueFromRow(row, invoiceNumberAliases) || '').trim() || undefined,
+                isCancelled: /cancel|cancelled|canceled/i.test(String(getValueFromRow(row, statusAliases) || '')),
                 type: 'Sales',
                 posStateCode: stateCode,
                 posStateName: stateName,
@@ -454,7 +490,27 @@ export async function parseMeeshoExcelFiles(
     }
   }
 
-  const allTransactions = [...salesTransactions, ...returnTransactions];
+  // Meesho return exports can repeat the same credit-note row across sheets.
+  // Keep legitimate multi-line sales/returns, but remove exact duplicate return rows.
+  const seenReturnRows = new Set<string>();
+  const normalizedReturns = returnTransactions.filter((tx) => {
+    const doc = (tx.invoiceNumber || tx.subOrderId || tx.orderId || '').toLowerCase().trim();
+    const key = [
+      doc,
+      tx.taxableValue.toFixed(2),
+      tx.gstRate,
+      tx.posStateCode,
+      tx.igstAmount.toFixed(2),
+      tx.cgstAmount.toFixed(2),
+      tx.sgstAmount.toFixed(2)
+    ].join('|');
+
+    if (!doc || seenReturnRows.has(key)) return false;
+    seenReturnRows.add(key);
+    return true;
+  });
+
+  const allTransactions = [...salesTransactions, ...normalizedReturns];
   const summary = calculateMeeshoImportSummary(allTransactions);
 
   const pos22Recs = allTransactions.filter(t => t.posStateCode === '22');

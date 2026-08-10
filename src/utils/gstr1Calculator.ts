@@ -139,20 +139,22 @@ export function calculateB2cs(
 }
 
 function extractDocPrefixAndNum(docStr: string) {
-  if (!docStr) return { prefix: 'DEFAULT', num: null };
-  const clean = String(docStr).trim();
-  const m = clean.match(/^([A-Za-z]+(?:\d+[A-Za-z]+)*?)(\d+)$/);
-  if (m) {
-    return { prefix: m[1], num: parseInt(m[2], 10) };
+  const clean = String(docStr || '').trim();
+  if (!clean) return { prefix: 'DEFAULT', num: null as number | null };
+
+  // Meesho/GST document series examples: awixc271, awixc27C74, awixc27CM14.
+  const match = clean.match(/^(.*?)(\d+)$/);
+  if (match) {
+    return { prefix: match[1], num: Number(match[2]) };
   }
-  return { prefix: 'SERIES', num: null };
+
+  return { prefix: 'SERIES', num: null as number | null };
 }
 
 function isGenericCategory(catName?: string) {
   if (!catName) return false;
   const lower = String(catName).toLowerCase();
-  if (lower.includes('order') || lower.includes('sub-') || lower.includes('ord-') || /^\d+$/.test(lower)) return false;
-  return true;
+  return !(lower.includes('order') || lower.includes('sub-') || lower.includes('ord-') || /^\d+$/.test(lower));
 }
 
 function buildDocCategories(
@@ -162,50 +164,76 @@ function buildDocCategories(
 ): DocumentCategorySummary[] {
   if (txList.length === 0) return [];
 
-  const groups: Record<string, { raw: string; num: number | null }[]> = {};
-  txList.forEach((tx) => {
-    const rawDoc = tx.invoiceNumber || tx.subOrderId || tx.orderId || '';
-    const catGroup = isGenericCategory(tx.returnCategory)
-      ? tx.returnCategory
-      : isGenericCategory(tx.sourceSheet)
-      ? tx.sourceSheet
-      : null;
-    const info = extractDocPrefixAndNum(rawDoc);
-    const groupKey = catGroup || (info.prefix !== 'DEFAULT' ? info.prefix : 'DEFAULT');
+  type DocItem = { raw: string; num: number | null; cancelled: boolean };
+  const groups: Record<string, Map<string, DocItem>> = {};
 
-    if (!groups[groupKey]) groups[groupKey] = [];
-    groups[groupKey].push({ raw: rawDoc, num: info.num });
+  txList.forEach((tx) => {
+    const rawDoc = String(tx.invoiceNumber || tx.subOrderId || tx.orderId || '').trim();
+    if (!rawDoc) return;
+
+    const info = extractDocPrefixAndNum(rawDoc);
+    const groupKey = info.num !== null
+      ? info.prefix.toUpperCase()
+      : (isGenericCategory(tx.returnCategory)
+          ? tx.returnCategory!
+          : isGenericCategory(tx.sourceSheet)
+          ? tx.sourceSheet!
+          : 'DEFAULT');
+
+    if (!groups[groupKey]) groups[groupKey] = new Map();
+
+    // Multiple transaction rows can belong to the same document. Count the
+    // document once, while preserving cancellation status.
+    const docKey = info.num !== null ? `${info.prefix.toUpperCase()}|${info.num}` : rawDoc.toLowerCase();
+    const existing = groups[groupKey].get(docKey);
+    if (existing) {
+      existing.cancelled = existing.cancelled || Boolean(tx.isCancelled);
+    } else {
+      groups[groupKey].set(docKey, {
+        raw: rawDoc,
+        num: info.num,
+        cancelled: Boolean(tx.isCancelled)
+      });
+    }
   });
 
   const categories: DocumentCategorySummary[] = [];
   let currDocNum = startDocNum;
 
-  Object.keys(groups).forEach((gKey) => {
-    const items = groups[gKey];
+  Object.keys(groups).forEach((groupKey) => {
+    const items = Array.from(groups[groupKey].values());
     items.sort((a, b) => {
       if (a.num !== null && b.num !== null) return a.num - b.num;
       return a.raw.localeCompare(b.raw);
     });
 
+    if (items.length === 0) return;
+
     const totalCount = items.length;
-    const from = items[0]?.raw || '1';
-    const to = items[items.length - 1]?.raw || String(totalCount);
+    const cancelledCount = items.filter((item) => item.cancelled).length;
 
     categories.push({
-      docNum: currDocNum,
+      docNum: currDocNum++,
       docType,
-      from,
-      to,
+      from: items[0].raw,
+      to: items[items.length - 1].raw,
       totalCount,
-      cancelledCount: 0,
-      netIssuedCount: totalCount,
-      sourceSheet: isGenericCategory(gKey) ? gKey : undefined
+      cancelledCount,
+      netIssuedCount: Math.max(0, totalCount - cancelledCount),
+      sourceSheet: infoForSourceSheet(groupKey, txList)
     });
-
-    currDocNum++;
   });
 
   return categories;
+}
+
+function infoForSourceSheet(groupKey: string, txList: MeeshoTransaction[]): string | undefined {
+  const tx = txList.find((item) => {
+    const rawDoc = String(item.invoiceNumber || item.subOrderId || item.orderId || '').trim();
+    const info = extractDocPrefixAndNum(rawDoc);
+    return info.prefix.toUpperCase() === groupKey;
+  });
+  return tx && isGenericCategory(tx.sourceSheet) ? tx.sourceSheet : undefined;
 }
 
 /**
@@ -218,56 +246,22 @@ export function calculateDocumentsIssued(
   const salesRecords = records.filter((r) => r.type === 'Sales');
   const returnRecords = records.filter((r) => r.type === 'Return');
 
-  const totalInvoices = salesRecords.length;
-  const totalCreditNotes = returnRecords.length;
-
   let manualDocs = 0;
   let manualCancelled = 0;
-
   manualEntries.filter((m) => m.section === 'doc_issue').forEach((e) => {
     manualDocs += Number(e.totalDocs) || 0;
     manualCancelled += Number(e.cancelledDocs) || 0;
   });
 
-  const categories: DocumentCategorySummary[] = [];
-
-  // Invoices categories
   const invoiceCats = buildDocCategories(salesRecords, 'Invoices for outward supply', 1);
-  if (invoiceCats.length > 0) {
-    invoiceCats[0].cancelledCount = manualCancelled;
-    invoiceCats[0].netIssuedCount = Math.max(0, invoiceCats[0].totalCount - manualCancelled);
-    categories.push(...invoiceCats);
-  } else if (totalInvoices > 0) {
-    categories.push({
-      docNum: 1,
-      docType: 'Invoices for outward supply',
-      from: '1',
-      to: String(totalInvoices),
-      totalCount: totalInvoices,
-      cancelledCount: manualCancelled,
-      netIssuedCount: Math.max(0, totalInvoices - manualCancelled)
-    });
-  }
+  const creditCats = buildDocCategories(returnRecords, 'Credit Note', invoiceCats.length + 1);
+  const categories = [...invoiceCats, ...creditCats];
 
-  // Credit Notes categories
-  const nextDocNum = categories.length + 1;
-  const creditCats = buildDocCategories(returnRecords, 'Credit Note', nextDocNum);
-  if (creditCats.length > 0) {
-    categories.push(...creditCats);
-  } else if (totalCreditNotes > 0) {
-    categories.push({
-      docNum: 2,
-      docType: 'Credit Note',
-      from: '1',
-      to: String(totalCreditNotes),
-      totalCount: totalCreditNotes,
-      cancelledCount: 0,
-      netIssuedCount: totalCreditNotes
-    });
-  }
-
+  const totalInvoices = invoiceCats.reduce((sum, c) => sum + c.totalCount, 0);
+  const totalCreditNotes = creditCats.reduce((sum, c) => sum + c.totalCount, 0);
+  const sourceCancelled = categories.reduce((sum, c) => sum + c.cancelledCount, 0);
   const totalDocs = totalInvoices + totalCreditNotes + manualDocs;
-  const cancelledDocs = manualCancelled;
+  const cancelledDocs = sourceCancelled + manualCancelled;
   const netIssuedDocs = Math.max(0, totalDocs - cancelledDocs);
 
   return {
@@ -548,11 +542,18 @@ export function calculateGstr1Summary(
     errors.push(`HSN Total Tax (₹${hsnTotalTax}) differs from B2CS Total Tax (₹${b2csTotalTax}).`);
   }
 
-  if (docIssue.totalInvoices !== salesRecords.length) {
-    errors.push(`Document Invoices Count (${docIssue.totalInvoices}) does not match Source Sales Count (${salesRecords.length}).`);
+  const categoryInvoiceCount = docIssue.categories
+    .filter((c) => c.docType === 'Invoices for outward supply')
+    .reduce((sum, c) => sum + c.totalCount, 0);
+  const categoryCreditNoteCount = docIssue.categories
+    .filter((c) => c.docType === 'Credit Note')
+    .reduce((sum, c) => sum + c.totalCount, 0);
+
+  if (docIssue.totalInvoices !== categoryInvoiceCount) {
+    errors.push(`Document Invoice Summary (${docIssue.totalInvoices}) does not match its document categories (${categoryInvoiceCount}).`);
   }
-  if (docIssue.totalCreditNotes !== returnRecords.length) {
-    errors.push(`Document Credit Notes Count (${docIssue.totalCreditNotes}) does not match Source Returns Count (${returnRecords.length}).`);
+  if (docIssue.totalCreditNotes !== categoryCreditNoteCount) {
+    errors.push(`Document Credit Note Summary (${docIssue.totalCreditNotes}) does not match its document categories (${categoryCreditNoteCount}).`);
   }
 
   const reconciliation: ReconciliationStatus = {

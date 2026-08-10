@@ -199,7 +199,7 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
         doc_det:
           report.docIssue.categories && report.docIssue.categories.length > 0
             ? report.docIssue.categories.map((cat, idx) => ({
-                doc_num: idx + 1,
+                doc_num: cat.docNum || idx + 1,
                 doc_typ: cat.docType,
                 docs: [
                   {
@@ -645,7 +645,7 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
             <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
               <tr className="hover:bg-slate-50/80 transition-colors">
                 <td className="px-4 py-3.5 font-bold font-mono text-slate-900">
-                  {report.b2csList.length > 0 ? report.recordCount : 0}
+                  {report.b2csList.length}
                 </td>
                 <td className="px-4 py-3.5 text-right font-mono font-bold text-slate-900">
                   {formatCurr(report.totalTaxable)}
@@ -1166,20 +1166,18 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-                  <tr className="hover:bg-slate-50">
-                    <td className="px-4 py-3 font-mono font-bold text-slate-900">1</td>
-                    <td className="px-4 py-3 font-bold text-slate-900">Invoices for outward supply</td>
-                    <td className="px-4 py-3 text-center font-mono font-bold">{report.docIssue.totalInvoices}</td>
-                    <td className="px-4 py-3 text-center font-mono text-rose-600 font-bold">{report.docIssue.cancelledDocs}</td>
-                    <td className="px-4 py-3 text-center font-mono text-emerald-600 font-extrabold">{report.docIssue.totalInvoices - report.docIssue.cancelledDocs}</td>
-                  </tr>
-                  <tr className="hover:bg-slate-50">
-                    <td className="px-4 py-3 font-mono font-bold text-slate-900">2</td>
-                    <td className="px-4 py-3 font-bold text-slate-900">Credit Note</td>
-                    <td className="px-4 py-3 text-center font-mono font-bold">{report.docIssue.totalCreditNotes}</td>
-                    <td className="px-4 py-3 text-center font-mono text-slate-400 font-bold">0</td>
-                    <td className="px-4 py-3 text-center font-mono text-emerald-600 font-extrabold">{report.docIssue.totalCreditNotes}</td>
-                  </tr>
+                  {report.docIssue.categories?.map((cat) => (
+                    <tr key={`${cat.docNum}-${cat.from}-${cat.to}`} className="hover:bg-slate-50">
+                      <td className="px-4 py-3 font-mono font-bold text-slate-900">{cat.docNum}</td>
+                      <td className="px-4 py-3">
+                        <div className="font-bold text-slate-900">{cat.docType}</div>
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">{cat.from} → {cat.to}</div>
+                      </td>
+                      <td className="px-4 py-3 text-center font-mono font-bold">{cat.totalCount}</td>
+                      <td className="px-4 py-3 text-center font-mono text-rose-600 font-bold">{cat.cancelledCount}</td>
+                      <td className="px-4 py-3 text-center font-mono text-emerald-600 font-extrabold">{cat.netIssuedCount}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>

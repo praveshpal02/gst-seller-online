@@ -166,31 +166,26 @@ export const MeeshoImportModal: React.FC<MeeshoImportModalProps> = ({
 
     try {
       // 1. Send request to backend endpoint `/api/meesho-import`
-      const backendResponse = await fetch('/api/meesho-import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          gstin,
-          periodMonth,
-          periodYear,
-          marketplace: 'MEESHO',
-          filesMeta: {
-            tcsSales: tcsSalesFile?.name,
-            tcsSalesReturn: tcsReturnFile?.name,
-            taxInvoice: taxInvoiceFile?.name
-          }
-        })
-      });
-
-      const resData = await backendResponse.json();
-
-      // Check for duplicate upload response
-      if (resData.isDuplicate) {
-        setIsProcessing(false);
-        setUploadStatus('DUPLICATE');
-        setStatusMessage(resData.message || `This Meesho report has already been uploaded for ${periodMonth} ${periodYear}.`);
-        return;
+      try {
+        await fetch('/api/meesho-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            gstin,
+            periodMonth,
+            periodYear,
+            marketplace: 'MEESHO',
+            forceReplace: true,
+            filesMeta: {
+              tcsSales: tcsSalesFile?.name,
+              tcsSalesReturn: tcsReturnFile?.name,
+              taxInvoice: taxInvoiceFile?.name
+            }
+          })
+        });
+      } catch (e) {
+        console.warn('Backend import registration warning:', e);
       }
 
       // 2. Parse client-side transactions from Excel
