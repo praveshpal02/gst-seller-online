@@ -22,6 +22,24 @@ const NUMERIC_IDENTIFIER_EXACT = new Set([
   'awb', 'awbno', 'trackingno', 'trackingnumber', 'documentno', 'documentnumber'
 ]);
 
+const gstRateAliases = ['gst rate', 'rate of tax', 'tax rate', 'gst %', 'gst_rate', 'rate'];
+const taxAmountAliases = ['tax amount', 'total tax amount', 'tax_amount', 'tax'];
+const igstAliases = ['igst amount', 'igst', 'integrated tax amount', 'integrated tax'];
+const cgstAliases = ['cgst amount', 'cgst', 'central tax amount', 'central tax'];
+const sgstAliases = ['sgst amount', 'sgst', 'state tax amount', 'state tax', 'utgst amount', 'utgst'];
+const dateAliases = ['order date', 'return date', 'invoice date', 'credit note date', 'transaction date', 'date'];
+const invoiceNumberAliases = [
+  'invoice number', 'invoice no', 'invoice #', 'tax invoice number', 'tax invoice no',
+  'invoice id', 'document number', 'document no', 'original invoice number'
+];
+const creditNoteNumberAliases = [
+  'credit note number', 'credit note no', 'credit note #', 'credit note id',
+  'creditnote number', 'creditnote no', 'document number', 'document no'
+];
+const statusAliases = ['status', 'document status', 'invoice status', 'credit note status', 'cancel status', 'cancellation status'];
+
+const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+
 function normalizeKey(value: string): string {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -142,7 +160,7 @@ export function calculateMeeshoImportSummary(
   const returnsTaxable = returnItems.reduce((acc, t) => acc + (t.taxableValue || 0), 0);
 
   const rawNetSale = salesTaxable - returnsTaxable;
-  const netSale = Math.round(rawNetSale * 100) / 100;
+  const netSale = round2(rawNetSale);
   const successRecords = salesItems.length + returnItems.length;
 
   return {
@@ -154,6 +172,49 @@ export function calculateMeeshoImportSummary(
     returnsTaxableValue: returnsTaxable
   };
 }
+
+const buildTaxAmounts = (
+  row: Record<string, any>,
+  finalTaxable: number,
+  gstRate: number,
+  isInterState: boolean
+) => {
+  const sourceTax = parseNumber(getValueFromRow(row, taxAmountAliases, true));
+  let igstFromRow = parseNumber(getValueFromRow(row, igstAliases, true));
+  let cgstFromRow = parseNumber(getValueFromRow(row, cgstAliases, true));
+  let sgstFromRow = parseNumber(getValueFromRow(row, sgstAliases, true));
+
+  if (igstFromRow > finalTaxable * 0.35) igstFromRow = 0;
+  if (cgstFromRow > finalTaxable * 0.35) cgstFromRow = 0;
+  if (sgstFromRow > finalTaxable * 0.35) sgstFromRow = 0;
+
+  if (Math.abs(sourceTax) > 0.001 && Math.abs(sourceTax) <= finalTaxable * 0.35) {
+    const taxTotal = round2(Math.abs(sourceTax));
+    if (isInterState) {
+      return { igstAmount: taxTotal, cgstAmount: 0, sgstAmount: 0 };
+    }
+    const cgstAmount = round2(taxTotal / 2);
+    const sgstAmount = round2(taxTotal - cgstAmount);
+    return { igstAmount: 0, cgstAmount, sgstAmount };
+  }
+
+  const hasRowTax = Math.abs(igstFromRow) > 0.001 || Math.abs(cgstFromRow) > 0.001 || Math.abs(sgstFromRow) > 0.001;
+  if (hasRowTax) {
+    return {
+      igstAmount: Math.abs(igstFromRow),
+      cgstAmount: Math.abs(cgstFromRow),
+      sgstAmount: Math.abs(sgstFromRow)
+    };
+  }
+
+  const taxTotal = round2(finalTaxable * (gstRate / 100));
+  if (isInterState) {
+    return { igstAmount: taxTotal, cgstAmount: 0, sgstAmount: 0 };
+  }
+  const cgstAmount = round2(taxTotal / 2);
+  const sgstAmount = round2(taxTotal - cgstAmount);
+  return { igstAmount: 0, cgstAmount, sgstAmount };
+};
 
 export async function parseMeeshoExcelFiles(
   files: UploadedFilesMap,
@@ -191,21 +252,6 @@ export async function parseMeeshoExcelFiles(
     'taxable'
   ];
 
-  const gstRateAliases = ['gst rate', 'rate of tax', 'tax rate', 'gst %', 'gst_rate', 'rate'];
-  const igstAliases = ['igst amount', 'igst', 'integrated tax amount', 'integrated tax'];
-  const cgstAliases = ['cgst amount', 'cgst', 'central tax amount', 'central tax'];
-  const sgstAliases = ['sgst amount', 'sgst', 'state tax amount', 'state tax', 'utgst amount', 'utgst'];
-  const dateAliases = ['order date', 'return date', 'invoice date', 'credit note date', 'transaction date', 'date'];
-  const invoiceNumberAliases = [
-    'invoice number', 'invoice no', 'invoice #', 'tax invoice number', 'tax invoice no',
-    'invoice id', 'document number', 'document no', 'original invoice number'
-  ];
-  const creditNoteNumberAliases = [
-    'credit note number', 'credit note no', 'credit note #', 'credit note id',
-    'creditnote number', 'creditnote no', 'document number', 'document no'
-  ];
-  const statusAliases = ['status', 'document status', 'invoice status', 'credit note status', 'cancel status', 'cancellation status'];
-
   // 1. Process TCS Sales File
   if (files.tcsSales) {
     try {
@@ -227,40 +273,11 @@ export async function parseMeeshoExcelFiles(
 
           if (rawOrderId || taxableVal !== 0) {
             let finalTaxable = Math.abs(taxableVal);
-            // Sanity cap: single B2C line item in Meesho reports does not exceed 10 Lakhs
             if (finalTaxable > 1000000) finalTaxable = 0;
             const orderId = rawOrderId || `TCS-ORD-${sIdx}-${idx}`;
 
-            let igstFromRow = parseNumber(getValueFromRow(row, igstAliases, true));
-            let cgstFromRow = parseNumber(getValueFromRow(row, cgstAliases, true));
-            let sgstFromRow = parseNumber(getValueFromRow(row, sgstAliases, true));
-
-            // Sanity check: tax for a single item shouldn't exceed 35% of taxable value
-            if (igstFromRow > finalTaxable * 0.35) igstFromRow = 0;
-            if (cgstFromRow > finalTaxable * 0.35) cgstFromRow = 0;
-            if (sgstFromRow > finalTaxable * 0.35) sgstFromRow = 0;
-
-            const hasRowTax = Math.abs(igstFromRow) > 0.001 || Math.abs(cgstFromRow) > 0.001 || Math.abs(sgstFromRow) > 0.001;
-
-            let igstAmount = 0;
-            let cgstAmount = 0;
-            let sgstAmount = 0;
-
-            if (hasRowTax) {
-              igstAmount = Math.abs(igstFromRow);
-              cgstAmount = Math.abs(cgstFromRow);
-              sgstAmount = Math.abs(sgstFromRow);
-            } else {
-              const taxTotal = Math.round((finalTaxable * (gstRate / 100)) * 100) / 100;
-              if (isInterState) {
-                igstAmount = taxTotal;
-              } else {
-                cgstAmount = Math.round((taxTotal / 2) * 100) / 100;
-                sgstAmount = Math.round((taxTotal - cgstAmount) * 100) / 100;
-              }
-            }
-
-            const tcsTotal = Math.round((finalTaxable * 0.01) * 100) / 100;
+            const { igstAmount, cgstAmount, sgstAmount } = buildTaxAmounts(row, finalTaxable, gstRate, isInterState);
+            const tcsTotal = round2(finalTaxable * 0.01);
 
             salesTransactions.push({
               id: `tcs-s-${sIdx}-${idx}-${Date.now()}`,
@@ -276,15 +293,15 @@ export async function parseMeeshoExcelFiles(
               isInterState,
               hsnCode: '6109',
               quantity: 1,
-              grossAmount: Math.round((finalTaxable + igstAmount + cgstAmount + sgstAmount) * 100) / 100,
+              grossAmount: round2(finalTaxable + igstAmount + cgstAmount + sgstAmount),
               taxableValue: finalTaxable,
               gstRate,
               igstAmount,
               cgstAmount,
               sgstAmount,
               tcsIgst: isInterState ? tcsTotal : 0,
-              tcsCgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
-              tcsSgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
+              tcsCgst: !isInterState ? round2(tcsTotal / 2) : 0,
+              tcsSgst: !isInterState ? round2(tcsTotal / 2) : 0,
               totalTcs: tcsTotal,
               sourceFile: files.tcsSales?.name || 'tcs_sales.xlsx',
               sourceSheet: sheetAnalysis.sheetName,
@@ -322,35 +339,8 @@ export async function parseMeeshoExcelFiles(
             if (finalTaxable > 1000000) finalTaxable = 0;
             const orderId = rawOrderId || `RET-ORD-${sIdx}-${idx}`;
 
-            let igstFromRow = parseNumber(getValueFromRow(row, igstAliases, true));
-            let cgstFromRow = parseNumber(getValueFromRow(row, cgstAliases, true));
-            let sgstFromRow = parseNumber(getValueFromRow(row, sgstAliases, true));
-
-            if (igstFromRow > finalTaxable * 0.35) igstFromRow = 0;
-            if (cgstFromRow > finalTaxable * 0.35) cgstFromRow = 0;
-            if (sgstFromRow > finalTaxable * 0.35) sgstFromRow = 0;
-
-            const hasRowTax = Math.abs(igstFromRow) > 0.001 || Math.abs(cgstFromRow) > 0.001 || Math.abs(sgstFromRow) > 0.001;
-
-            let igstAmount = 0;
-            let cgstAmount = 0;
-            let sgstAmount = 0;
-
-            if (hasRowTax) {
-              igstAmount = Math.abs(igstFromRow);
-              cgstAmount = Math.abs(cgstFromRow);
-              sgstAmount = Math.abs(sgstFromRow);
-            } else {
-              const taxTotal = Math.round((finalTaxable * (gstRate / 100)) * 100) / 100;
-              if (isInterState) {
-                igstAmount = taxTotal;
-              } else {
-                cgstAmount = Math.round((taxTotal / 2) * 100) / 100;
-                sgstAmount = Math.round((taxTotal - cgstAmount) * 100) / 100;
-              }
-            }
-
-            const tcsTotal = Math.round((finalTaxable * 0.01) * 100) / 100;
+            const { igstAmount, cgstAmount, sgstAmount } = buildTaxAmounts(row, finalTaxable, gstRate, isInterState);
+            const tcsTotal = round2(finalTaxable * 0.01);
 
             returnTransactions.push({
               id: `tcs-r-${sIdx}-${idx}-${Date.now()}`,
@@ -366,15 +356,15 @@ export async function parseMeeshoExcelFiles(
               isInterState,
               hsnCode: '6109',
               quantity: 1,
-              grossAmount: Math.round((finalTaxable + igstAmount + cgstAmount + sgstAmount) * 100) / 100,
+              grossAmount: round2(finalTaxable + igstAmount + cgstAmount + sgstAmount),
               taxableValue: finalTaxable,
               gstRate,
               igstAmount,
               cgstAmount,
               sgstAmount,
               tcsIgst: isInterState ? tcsTotal : 0,
-              tcsCgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
-              tcsSgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
+              tcsCgst: !isInterState ? round2(tcsTotal / 2) : 0,
+              tcsSgst: !isInterState ? round2(tcsTotal / 2) : 0,
               totalTcs: tcsTotal,
               sourceFile: files.tcsSalesReturn?.name || 'tcs_sales_return.xlsx',
               sourceSheet: sheetAnalysis.sheetName,
@@ -418,7 +408,7 @@ export async function parseMeeshoExcelFiles(
                 if (igst > 0 && igst <= match.taxableValue * 0.35) match.igstAmount = igst;
                 if (cgst > 0 && cgst <= match.taxableValue * 0.35) match.cgstAmount = cgst;
                 if (sgst > 0 && sgst <= match.taxableValue * 0.35) match.sgstAmount = sgst;
-                match.grossAmount = Math.round((match.taxableValue + match.igstAmount + match.cgstAmount + match.sgstAmount) * 100) / 100;
+                match.grossAmount = round2(match.taxableValue + match.igstAmount + match.cgstAmount + match.sgstAmount);
               }
             }
           });
@@ -433,9 +423,6 @@ export async function parseMeeshoExcelFiles(
             const qty = parseNumber(getValueFromRow(row, ['quantity', 'qty', 'units'], true)) || 1;
             const taxableVal = parseNumber(getValueFromRow(row, salesTaxableAliases, true));
             const gstRate = parseNumber(getValueFromRow(row, gstRateAliases, true)) || 5;
-            let igst = parseNumber(getValueFromRow(row, igstAliases, true));
-            let cgst = parseNumber(getValueFromRow(row, cgstAliases, true));
-            let sgst = parseNumber(getValueFromRow(row, sgstAliases, true));
             const invoiceDate = String(getValueFromRow(row, dateAliases) || new Date().toISOString().split('T')[0]).trim();
 
             const { stateCode, stateName } = resolveIndianState(posStateRaw);
@@ -445,13 +432,10 @@ export async function parseMeeshoExcelFiles(
               let finalTaxable = Math.abs(taxableVal);
               if (finalTaxable > 1000000) finalTaxable = 0;
               const orderId = rawOrderId || `ORD-TX-${sIdx}-${idx}`;
-              const tcsTotal = Math.round((finalTaxable * 0.01) * 100) / 100;
+              const tcsTotal = round2(finalTaxable * 0.01);
 
-              if (igst > finalTaxable * 0.35) igst = 0;
-              if (cgst > finalTaxable * 0.35) cgst = 0;
-              if (sgst > finalTaxable * 0.35) sgst = 0;
-
-              const taxTotal = Math.round(((igst || (cgst + sgst)) || (finalTaxable * (gstRate / 100))) * 100) / 100;
+              const { igstAmount, cgstAmount, sgstAmount } = buildTaxAmounts(row, finalTaxable, gstRate, isInterState);
+              const taxTotal = igstAmount || (cgstAmount + sgstAmount);
 
               salesTransactions.push({
                 id: `tx-inv-${sIdx}-${idx}-${Date.now()}`,
@@ -467,15 +451,15 @@ export async function parseMeeshoExcelFiles(
                 isInterState,
                 hsnCode,
                 quantity: qty,
-                grossAmount: Math.round((finalTaxable + taxTotal) * 100) / 100,
+                grossAmount: round2(finalTaxable + taxTotal),
                 taxableValue: finalTaxable,
                 gstRate,
-                igstAmount: igst || (isInterState ? taxTotal : 0),
-                cgstAmount: cgst || (!isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0),
-                sgstAmount: sgst || (!isInterState ? Math.round((taxTotal / 2) * 100) / 100 : 0),
+                igstAmount,
+                cgstAmount,
+                sgstAmount,
                 tcsIgst: isInterState ? tcsTotal : 0,
-                tcsCgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
-                tcsSgst: !isInterState ? Math.round((tcsTotal / 2) * 100) / 100 : 0,
+                tcsCgst: !isInterState ? round2(tcsTotal / 2) : 0,
+                tcsSgst: !isInterState ? round2(tcsTotal / 2) : 0,
                 totalTcs: tcsTotal,
                 sourceFile: files.taxInvoice?.name || 'Tax_invoice_details.xlsx',
                 sourceSheet: sheetAnalysis.sheetName,
@@ -657,15 +641,15 @@ export function calculateManageDataSummary(transactions: MeeshoTransaction[]): M
 
   const grossSales = sales.reduce((acc, t) => acc + (t.taxableValue || 0), 0);
   const returnsVal = returns.reduce((acc, t) => acc + (t.taxableValue || 0), 0);
-  const netTaxableSales = Math.round((grossSales - returnsVal) * 100) / 100;
+  const netTaxableSales = round2(grossSales - returnsVal);
 
   const salesGst = sales.reduce((acc, t) => acc + (t.igstAmount || 0) + (t.cgstAmount || 0) + (t.sgstAmount || 0), 0);
   const returnsGst = returns.reduce((acc, t) => acc + (t.igstAmount || 0) + (t.cgstAmount || 0) + (t.sgstAmount || 0), 0);
-  const gstTaxLiability = Math.round((salesGst - returnsGst) * 100) / 100;
+  const gstTaxLiability = round2(salesGst - returnsGst);
 
   const salesTcs = sales.reduce((acc, t) => acc + (t.totalTcs || 0), 0);
   const returnsTcs = returns.reduce((acc, t) => acc + (t.totalTcs || 0), 0);
-  const tcsClaimable = Math.round((salesTcs - returnsTcs) * 100) / 100;
+  const tcsClaimable = round2(salesTcs - returnsTcs);
 
   return {
     platforms: transactions.length > 0 ? 1 : 0,
