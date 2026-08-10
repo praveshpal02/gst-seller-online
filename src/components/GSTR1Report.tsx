@@ -51,6 +51,7 @@ const INDIAN_STATES: Record<string, string> = {
   '22': 'Chhattisgarh',
   '23': 'Madhya Pradesh',
   '24': 'Gujarat',
+  '26': 'Dadra and Nagar Haveli and Daman and Diu',
   '27': 'Maharashtra',
   '29': 'Karnataka',
   '30': 'Goa',

@@ -24,15 +24,17 @@ export function calculateB2cs(
 ): StateGSTR1Summary[] {
   const b2csMap: Record<string, StateGSTR1Summary> = {};
 
+  // Build taxable totals from source rows first. Tax is intentionally calculated
+  // after aggregation, not rounded per transaction. This matches the GST Tool
+  // behavior and avoids cumulative one-paise differences.
   records.forEach((tx) => {
     const taxableVal = Number(tx.taxableValue) || 0;
     const gstRate = Number(tx.gstRate) || 5;
-
     const stateCode = tx.posStateCode || '07';
     const stateName = tx.posStateName || 'Delhi';
     const isInterState = stateCode !== sellerStateCode;
-
     const key = `${stateCode}_${gstRate}`;
+    const multiplier = tx.type === 'Sales' ? 1 : -1;
 
     if (!b2csMap[key]) {
       b2csMap[key] = {
@@ -50,41 +52,24 @@ export function calculateB2cs(
       };
     }
 
-    const multiplier = tx.type === 'Sales' ? 1 : -1;
-    const row = b2csMap[key];
-
-    const netTaxable = taxableVal * multiplier;
-    let igst = 0;
-    let cgst = 0;
-    let sgst = 0;
-
-    if (isInterState) {
-      igst = Number(tx.igstAmount) > 0 ? Number(tx.igstAmount) * multiplier : netTaxable * (gstRate / 100);
-      cgst = 0;
-      sgst = 0;
-    } else {
-      igst = 0;
-      if (Number(tx.cgstAmount) > 0 && Number(tx.sgstAmount) > 0) {
-        cgst = Number(tx.cgstAmount) * multiplier;
-        sgst = Number(tx.sgstAmount) * multiplier;
-      } else {
-        const taxTotal = netTaxable * (gstRate / 100);
-        cgst = taxTotal / 2;
-        sgst = taxTotal / 2;
-      }
-    }
-
-    const grossVal = tx.grossAmount ? Number(tx.grossAmount) * multiplier : (netTaxable + igst + cgst + sgst);
-
-    row.taxableValue += netTaxable;
-    row.igstAmount += igst;
-    row.cgstAmount += cgst;
-    row.sgstAmount += sgst;
-    row.totalTax += igst + cgst + sgst;
-    row.totalInvoiceValue += grossVal;
+    b2csMap[key].taxableValue += taxableVal * multiplier;
   });
 
-  // Merge manual B2CS entries
+  // Calculate tax from the aggregated taxable amount for each state/rate group.
+  Object.values(b2csMap).forEach((row) => {
+    const taxable = row.taxableValue;
+    const tax = taxable * (row.gstRate / 100);
+    if (row.type === 'INTER') {
+      row.igstAmount = tax;
+    } else {
+      row.cgstAmount = tax / 2;
+      row.sgstAmount = tax / 2;
+    }
+    row.totalTax = row.igstAmount + row.cgstAmount + row.sgstAmount;
+    row.totalInvoiceValue = taxable + row.totalTax;
+  });
+
+  // Manual B2CS entries are additive and retain their explicitly entered tax.
   manualEntries.filter((m) => m.section === 'b2cs').forEach((entry) => {
     const stateCode = entry.stateCode || '07';
     const stateName = entry.stateName || 'Delhi';
@@ -123,7 +108,6 @@ export function calculateB2cs(
     row.totalInvoiceValue += invoiceVal;
   });
 
-  // Apply round2 to final group totals and sort by stateCode
   return Object.values(b2csMap)
     .map((r) => ({
       ...r,
@@ -243,34 +227,101 @@ export function calculateDocumentsIssued(
   records: MeeshoTransaction[],
   manualEntries: ManualGSTR1Entry[] = []
 ): DocumentsIssuedSummary {
+  const refs = records.flatMap((r) => r.documentReferences || []);
+
+  // Tax Invoice Details is authoritative when document references are present.
+  // De-duplicate by document type + actual document number, not by TCS row.
+  if (refs.length > 0) {
+    const unique = new Map<string, typeof refs[number]>();
+    refs.forEach((ref) => {
+      if (!ref.number) return;
+      const key = `${ref.type}|${String(ref.number).trim().toUpperCase()}`;
+      const existing = unique.get(key);
+      if (existing) {
+        existing.cancelled = Boolean(existing.cancelled || ref.cancelled);
+      } else {
+        unique.set(key, { ...ref });
+      }
+    });
+
+    const all = Array.from(unique.values());
+    const invoiceRefs = all.filter((r) => r.type === 'INVOICE');
+    const creditRefs = all.filter((r) => r.type === 'CREDIT_NOTE' || r.type === 'CREDIT_DISCOUNT');
+
+    const makeCategories = (items: typeof all, docType: string, startNum: number): DocumentCategorySummary[] => {
+      const grouped: Record<string, typeof all> = {};
+      items.forEach((item) => {
+        const info = extractDocPrefixAndNum(item.number);
+        const key = info.prefix.toUpperCase();
+        (grouped[key] ||= []).push(item);
+      });
+
+      return Object.entries(grouped)
+        .map(([prefix, group], index) => {
+          const sorted = [...group].sort((a, b) => {
+            const na = extractDocPrefixAndNum(a.number).num ?? Number.MAX_SAFE_INTEGER;
+            const nb = extractDocPrefixAndNum(b.number).num ?? Number.MAX_SAFE_INTEGER;
+            return na - nb || a.number.localeCompare(b.number);
+          });
+          const cancelledCount = sorted.filter((r) => r.cancelled).length;
+          return {
+            docNum: startNum + index,
+            docType,
+            from: sorted[0]?.number,
+            to: sorted[sorted.length - 1]?.number,
+            totalCount: sorted.length,
+            cancelledCount,
+            netIssuedCount: Math.max(0, sorted.length - cancelledCount)
+          };
+        })
+        .sort((a, b) => (a.from || '').localeCompare(b.from || ''));
+    };
+
+    const invoiceCats = makeCategories(invoiceRefs, 'Invoices for outward supply', 1);
+    const creditCats = makeCategories(creditRefs, 'Credit Note', invoiceCats.length + 1);
+    const categories = [...invoiceCats, ...creditCats];
+
+    const manualDocs = manualEntries.filter((m) => m.section === 'doc_issue');
+    const manualTotal = manualDocs.reduce((sum, e) => sum + (Number(e.totalDocs) || 0), 0);
+    const manualCancelled = manualDocs.reduce((sum, e) => sum + (Number(e.cancelledDocs) || 0), 0);
+    const totalInvoices = invoiceRefs.length;
+    const totalCreditNotes = creditRefs.length;
+    const totalDocs = totalInvoices + totalCreditNotes + manualTotal;
+    const cancelledDocs = categories.reduce((sum, c) => sum + c.cancelledCount, 0) + manualCancelled;
+
+    return {
+      recordCount: categories.length,
+      totalInvoices,
+      totalCreditNotes,
+      totalDocs,
+      cancelledDocs,
+      netIssuedDocs: Math.max(0, totalDocs - cancelledDocs),
+      categories
+    };
+  }
+
+  // Fallback for manually-created datasets without Tax Invoice Details metadata.
   const salesRecords = records.filter((r) => r.type === 'Sales');
   const returnRecords = records.filter((r) => r.type === 'Return');
-
-  let manualDocs = 0;
-  let manualCancelled = 0;
-  manualEntries.filter((m) => m.section === 'doc_issue').forEach((e) => {
-    manualDocs += Number(e.totalDocs) || 0;
-    manualCancelled += Number(e.cancelledDocs) || 0;
-  });
-
   const invoiceCats = buildDocCategories(salesRecords, 'Invoices for outward supply', 1);
   const creditCats = buildDocCategories(returnRecords, 'Credit Note', invoiceCats.length + 1);
   const categories = [...invoiceCats, ...creditCats];
-
   const totalInvoices = invoiceCats.reduce((sum, c) => sum + c.totalCount, 0);
   const totalCreditNotes = creditCats.reduce((sum, c) => sum + c.totalCount, 0);
+  const manualDocs = manualEntries.filter((m) => m.section === 'doc_issue');
+  const manualTotal = manualDocs.reduce((sum, e) => sum + (Number(e.totalDocs) || 0), 0);
+  const manualCancelled = manualDocs.reduce((sum, e) => sum + (Number(e.cancelledDocs) || 0), 0);
   const sourceCancelled = categories.reduce((sum, c) => sum + c.cancelledCount, 0);
-  const totalDocs = totalInvoices + totalCreditNotes + manualDocs;
+  const totalDocs = totalInvoices + totalCreditNotes + manualTotal;
   const cancelledDocs = sourceCancelled + manualCancelled;
-  const netIssuedDocs = Math.max(0, totalDocs - cancelledDocs);
 
   return {
-    recordCount: records.length,
+    recordCount: categories.length,
     totalInvoices,
     totalCreditNotes,
     totalDocs,
     cancelledDocs,
-    netIssuedDocs,
+    netIssuedDocs: Math.max(0, totalDocs - cancelledDocs),
     categories
   };
 }

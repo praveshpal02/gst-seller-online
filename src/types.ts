@@ -31,6 +31,12 @@ export interface PlatformItem {
   importedCount?: number;
 }
 
+export interface MeeshoDocumentReference {
+  type: 'INVOICE' | 'CREDIT_NOTE' | 'CREDIT_DISCOUNT' | 'CREDIT_CONVERSION';
+  number: string;
+  cancelled?: boolean;
+}
+
 export interface MeeshoTransaction {
   id: string;
   orderId: string;
@@ -60,6 +66,8 @@ export interface MeeshoTransaction {
   isCancelled?: boolean;
   customerGstin?: string;
   returnCategory?: string;
+  documentType?: MeeshoDocumentReference['type'];
+  documentReferences?: MeeshoDocumentReference[];
 }
 
 export interface StateGSTR1Summary {
