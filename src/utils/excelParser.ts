@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { MeeshoTransaction, MeeshoDocumentReference } from '../types';
+import type { MeeshoTransaction, MeeshoDocumentReference } from '../types';
 import { analyzeWorksheetHeaders, SheetHeaderAnalysis } from '../components/gst-online-seller/import/meesho/MeeshoFileValidator';
 
 export interface UploadedFilesMap {
@@ -71,6 +71,20 @@ function getValueFromRow(row: Record<string, any>, aliases: string[], isNumericF
     if (!keyClean) continue;
 
     if (isNumericField && (isIdKey(keyClean) || isNumericIdentifierHeader(key))) continue;
+
+    // Filter out supplier/seller/vendor/dispatch/origin state headers when extracting customer/POS state
+    if (!isNumericField && (
+      keyClean.includes('supplier') ||
+      keyClean.includes('seller') ||
+      keyClean.includes('vendor') ||
+      keyClean.includes('dispatch') ||
+      keyClean.includes('origin') ||
+      keyClean.includes('pickup') ||
+      keyClean.includes('fromstate') ||
+      keyClean.includes('gstinstate')
+    )) {
+      continue;
+    }
 
     for (const alias of aliases) {
       const aliasClean = normalizeKey(alias);

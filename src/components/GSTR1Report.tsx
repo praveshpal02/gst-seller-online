@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MeeshoTransaction, StateGSTR1Summary, HSNSummary, ManualGSTR1Entry } from '../types';
+import { MeeshoTransaction, StateGSTR1Summary, HSNSummary, ManualGSTR1Entry, EcommerceOperatorSummary } from '../types';
 import {
   FileText,
   Download,
@@ -110,6 +110,24 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
   const [operatorGstin, setOperatorGstin] = useState<string>('07AARCM9332R1CQ');
   const [manualEntries, setManualEntries] = useState<ManualGSTR1Entry[]>([]);
 
+  // Load manual entries from database
+  useEffect(() => {
+    if (!gstin || !periodMonth || !periodYear) return;
+    let isMounted = true;
+    const query = new URLSearchParams({ gstin, periodMonth, periodYear });
+    fetch(`/api/manual-entries?${query.toString()}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.success && Array.isArray(data.entries)) {
+          setManualEntries(data.entries);
+        }
+      })
+      .catch((err) => console.error('Error fetching manual entries:', err));
+
+    return () => { isMounted = false; };
+  }, [gstin, periodMonth, periodYear]);
+
   // Modals State
   const [isAddEntryModalOpen, setIsAddEntryModalOpen] = useState<boolean>(false);
   const [viewSectionModal, setViewSectionModal] = useState<'b2cs' | 'doc_issue' | 'sec14' | 'hsn' | null>(null);
@@ -143,6 +161,81 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
   // 1. Calculate Master GSTR-1 Dataset dynamically
   const sellerStateCode = gstin ? gstin.substring(0, 2) : '07';
   const report = calculateGstr1Summary(transactions, manualEntries, operatorGstin, sellerStateCode);
+
+  // Table 14 Override state
+  const [table14Override, setTable14Override] = useState<EcommerceOperatorSummary[] | null>(null);
+
+  // Table 14 Edit Modal state
+  const [editingEcoIndex, setEditingEcoIndex] = useState<number | null>(null);
+  const [ecoFormGstin, setEcoFormGstin] = useState<string>('');
+  const [ecoFormPortal, setEcoFormPortal] = useState<string>('');
+  const [ecoFormNetValue, setEcoFormNetValue] = useState<string>('');
+  const [ecoFormIgst, setEcoFormIgst] = useState<string>('');
+  const [ecoFormCgst, setEcoFormCgst] = useState<string>('');
+  const [ecoFormSgst, setEcoFormSgst] = useState<string>('');
+
+  const effectiveTable14 = table14Override !== null ? table14Override : report.ecoSummary;
+
+  useEffect(() => {
+    setTable14Override(null);
+  }, [transactions, periodMonth, periodYear, gstin]);
+
+  const handleOpenEditEcoModal = (eco: EcommerceOperatorSummary, index: number) => {
+    setEditingEcoIndex(index);
+    setEcoFormGstin(eco.operatorGstin || '07AARCM9332R1CQ');
+    setEcoFormPortal(eco.portalName || 'Meesho');
+    setEcoFormNetValue(eco.netTaxableValue !== undefined ? String(eco.netTaxableValue) : '0');
+    setEcoFormIgst(eco.igstAmount !== undefined ? String(eco.igstAmount) : '0');
+    setEcoFormCgst(eco.cgstAmount !== undefined ? String(eco.cgstAmount) : '0');
+    setEcoFormSgst(eco.sgstAmount !== undefined ? String(eco.sgstAmount) : '0');
+    setIsEditEcoModalOpen(true);
+  };
+
+  const handleSaveEcoEdit = () => {
+    if (editingEcoIndex === null) return;
+    const netVal = parseFloat(ecoFormNetValue) || 0;
+    const igst = parseFloat(ecoFormIgst) || 0;
+    const cgst = parseFloat(ecoFormCgst) || 0;
+    const sgst = parseFloat(ecoFormSgst) || 0;
+    const totalTax = igst + cgst + sgst;
+
+    const updatedRecord: EcommerceOperatorSummary = {
+      operatorGstin: ecoFormGstin.trim().toUpperCase(),
+      portalName: ecoFormPortal.trim(),
+      recordCount: effectiveTable14[editingEcoIndex]?.recordCount || 0,
+      netTaxableValue: netVal,
+      igstAmount: igst,
+      cgstAmount: cgst,
+      sgstAmount: sgst,
+      totalTax: totalTax
+    };
+
+    const currentList = [...effectiveTable14];
+    currentList[editingEcoIndex] = updatedRecord;
+
+    setTable14Override(currentList);
+    if (ecoFormGstin.trim()) {
+      setOperatorGstin(ecoFormGstin.trim().toUpperCase());
+    }
+    setIsEditEcoModalOpen(false);
+    setEditingEcoIndex(null);
+  };
+
+  const handleDeleteEcoRecord = () => {
+    if (editingEcoIndex === null) return;
+    if (window.confirm('Are you sure you want to delete this Table 14 record?')) {
+      const currentList = [...effectiveTable14];
+      currentList.splice(editingEcoIndex, 1);
+      setTable14Override(currentList);
+      setIsEditEcoModalOpen(false);
+      setEditingEcoIndex(null);
+    }
+  };
+
+  const handleCloseEcoModal = () => {
+    setIsEditEcoModalOpen(false);
+    setEditingEcoIndex(null);
+  };
 
   // Currency Helper
   const formatCurr = (val: number) => {
@@ -185,16 +278,14 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
         csamt: 0
       })),
       supeco: {
-        clttx: [
-          {
-            etin: operatorGstin || '07AARCM9332R1CQ',
-            suppval: Number((report.ecoSummary[0]?.netTaxableValue || 0).toFixed(2)),
-            igst: Number((report.ecoSummary[0]?.igstAmount || 0).toFixed(2)),
-            cgst: Number((report.ecoSummary[0]?.cgstAmount || 0).toFixed(2)),
-            sgst: Number((report.ecoSummary[0]?.sgstAmount || 0).toFixed(2)),
-            cess: 0
-          }
-        ]
+        clttx: effectiveTable14.map((eco) => ({
+          etin: eco.operatorGstin || operatorGstin || '07AARCM9332R1CQ',
+          suppval: Number(eco.netTaxableValue.toFixed(2)),
+          igst: Number(eco.igstAmount.toFixed(2)),
+          cgst: Number(eco.cgstAmount.toFixed(2)),
+          sgst: Number(eco.sgstAmount.toFixed(2)),
+          cess: 0
+        }))
       },
       doc_issue: {
         doc_det:
@@ -313,7 +404,7 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
     XLSX.utils.book_append_sheet(wb, docSheet, 'Documents Issued (Sec 13)');
 
     // Section 14 ECO
-    const ecoSheetData = report.ecoSummary.map(e => ({
+    const ecoSheetData = effectiveTable14.map(e => ({
       'Marketplace / ECO': e.portalName,
       'Operator GSTIN': e.operatorGstin,
       'Net Taxable Supplies (₹)': e.netTaxableValue,
@@ -751,10 +842,11 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
                 <th className="px-4 py-3 text-right">INTEGRATED TAX (₹)</th>
                 <th className="px-4 py-3 text-right">CENTRAL TAX (₹)</th>
                 <th className="px-4 py-3 text-right">STATE/UT TAX (₹)</th>
+                <th className="px-4 py-3 text-center">ACTION</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-              {report.ecoSummary.map((eco, idx) => (
+              {effectiveTable14.map((eco, idx) => (
                 <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
                   <td className="px-4 py-3.5 font-bold text-slate-900">{eco.portalName}</td>
                   <td className="px-4 py-3.5 font-mono font-bold text-blue-700">{eco.operatorGstin}</td>
@@ -762,8 +854,24 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
                   <td className="px-4 py-3.5 text-right font-mono text-slate-700">{formatCurr(eco.igstAmount)}</td>
                   <td className="px-4 py-3.5 text-right font-mono text-slate-700">{formatCurr(eco.cgstAmount)}</td>
                   <td className="px-4 py-3.5 text-right font-mono text-slate-700">{formatCurr(eco.sgstAmount)}</td>
+                  <td className="px-4 py-3.5 text-center">
+                    <button
+                      onClick={() => handleOpenEditEcoModal(eco, idx)}
+                      className="text-xs text-blue-600 hover:text-blue-800 font-bold flex items-center justify-center space-x-1 mx-auto hover:underline"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>Edit</span>
+                    </button>
+                  </td>
                 </tr>
               ))}
+              {effectiveTable14.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-6 text-center text-slate-400 italic">
+                    No Table 14 records present.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1229,7 +1337,7 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-                  {report.ecoSummary.map((eco, idx) => (
+                  {effectiveTable14.map((eco, idx) => (
                     <tr key={idx} className="hover:bg-slate-50">
                       <td className="px-4 py-3 font-bold text-slate-900">{eco.portalName}</td>
                       <td className="px-4 py-3 font-mono font-bold text-blue-700">{eco.operatorGstin}</td>
@@ -1241,15 +1349,23 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
                         <button
                           onClick={() => {
                             setViewSectionModal(null);
-                            setIsEditEcoModalOpen(true);
+                            handleOpenEditEcoModal(eco, idx);
                           }}
-                          className="text-xs text-blue-600 hover:text-blue-800 font-bold hover:underline"
+                          className="text-xs text-blue-600 hover:text-blue-800 font-bold hover:underline flex items-center justify-center space-x-1 mx-auto"
                         >
-                          Edit
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Edit</span>
                         </button>
                       </td>
                     </tr>
                   ))}
+                  {effectiveTable14.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-6 text-center text-slate-400 italic">
+                        No Table 14 records present.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1481,41 +1597,167 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
       )}
 
       {/* ================================================== */}
-      {/* MODAL 5: EDIT E-COMMERCE OPERATOR DETAILS           */}
+      {/* MODAL 5: EDIT E-COMMERCE OPERATOR DETAILS (GST TOOL STYLE) */}
       {/* ================================================== */}
       {isEditEcoModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-white">
               <h3 className="text-base font-bold text-slate-900">
-                Edit E-Commerce Operator Details
+                Supplies via E-Commerce Operators (u/s 52)
               </h3>
-              <button onClick={() => setIsEditEcoModalOpen(false)} className="text-slate-400 p-1">
+              <button
+                onClick={handleCloseEcoModal}
+                className="text-slate-400 hover:text-slate-600 transition-colors p-1 rounded-lg hover:bg-slate-100"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-3 text-xs">
+            {/* Modal Body */}
+            <div className="p-6 space-y-6">
+              {/* Section 1: E-COMMERCE OPERATOR */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Operator GSTIN</label>
-                <input
-                  type="text"
-                  value={operatorGstin}
-                  onChange={(e) => setOperatorGstin(e.target.value.toUpperCase())}
-                  maxLength={15}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-mono font-bold text-slate-900 uppercase"
-                />
-              </div>
-              <p className="text-[11px] text-slate-500">
-                Default GSTIN for Meesho operator is <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">07AARCM9332R1CQ</code>.
-              </p>
+                <h4 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-3">
+                  E-COMMERCE OPERATOR
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                  {/* GSTIN Field (approx 58% width ~ col-span-7) */}
+                  <div className="md:col-span-7">
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1.5">
+                      GSTIN OF E-COMMERCE OPERATOR
+                    </label>
+                    <input
+                      type="text"
+                      value={ecoFormGstin}
+                      onChange={(e) => setEcoFormGstin(e.target.value.toUpperCase())}
+                      maxLength={15}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900 uppercase focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 flex items-center gap-1">
+                      <span>ⓘ</span>
+                      <span>This is the operator's GSTIN (not your own).</span>
+                    </p>
+                  </div>
 
-              <div className="pt-2 flex justify-end space-x-2">
+                  {/* PORTAL Field (remaining width ~ col-span-5) */}
+                  <div className="md:col-span-5">
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1.5">
+                      PORTAL
+                    </label>
+                    <input
+                      type="text"
+                      value={ecoFormPortal}
+                      onChange={(e) => setEcoFormPortal(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: AMOUNTS (₹) */}
+              <div>
+                <h4 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-3">
+                  AMOUNTS (₹)
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                  {/* NET VALUE (TAXABLE) */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1.5">
+                      NET VALUE (TAXABLE)
+                    </label>
+                    <div className="relative flex items-center">
+                      <span className="absolute left-3 text-slate-500 font-bold text-xs select-none">₹</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={ecoFormNetValue}
+                        onChange={(e) => setEcoFormNetValue(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* IGST */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1.5">
+                      IGST
+                    </label>
+                    <div className="relative flex items-center">
+                      <span className="absolute left-3 text-slate-500 font-bold text-xs select-none">₹</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={ecoFormIgst}
+                        onChange={(e) => setEcoFormIgst(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* CGST */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1.5">
+                      CGST
+                    </label>
+                    <div className="relative flex items-center">
+                      <span className="absolute left-3 text-slate-500 font-bold text-xs select-none">₹</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={ecoFormCgst}
+                        onChange={(e) => setEcoFormCgst(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* SGST */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1.5">
+                      SGST
+                    </label>
+                    <div className="relative flex items-center">
+                      <span className="absolute left-3 text-slate-500 font-bold text-xs select-none">₹</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={ecoFormSgst}
+                        onChange={(e) => setEcoFormSgst(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Actions Separated by Divider */}
+            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={handleDeleteEcoRecord}
+                className="px-4 py-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors flex items-center space-x-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>DELETE</span>
+              </button>
+
+              <div className="flex items-center space-x-3">
                 <button
-                  onClick={() => setIsEditEcoModalOpen(false)}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-xs"
+                  type="button"
+                  onClick={handleCloseEcoModal}
+                  className="px-4 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors"
                 >
-                  Done
+                  CLOSE
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveEcoEdit}
+                  className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors"
+                >
+                  SAVE CHANGES
                 </button>
               </div>
             </div>

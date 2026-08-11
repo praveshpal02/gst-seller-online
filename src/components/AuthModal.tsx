@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShieldCheck, User, Lock, Mail, Building, ArrowRight, Sparkles } from 'lucide-react';
+import { ShieldCheck, User, Lock, Mail, Building, ArrowRight, Sparkles, AlertCircle } from 'lucide-react';
 import { UserProfile } from '../types';
 
 interface AuthModalProps {
@@ -12,26 +12,83 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
   const [password, setPassword] = useState('password123');
   const [businessName, setBusinessName] = useState('Zenith Traders');
   const [fullName, setFullName] = useState('Pravesh Pal');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onLoginSuccess({
-      id: 'usr_1',
-      name: fullName || 'Demo Seller',
-      email: email || 'seller@example.com',
-      businessName: businessName || 'Zenith Traders',
-      isLoggedIn: true
-    });
+    setErrorMsg(null);
+    setLoading(true);
+
+    const endpoint = isSignUp ? '/api/auth/register' : '/api/auth/login';
+    const body = isSignUp
+      ? { email, password, name: fullName, businessName }
+      : { email, password };
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setErrorMsg(data.message || 'Authentication failed. Please check your credentials.');
+        setLoading(false);
+        return;
+      }
+
+      onLoginSuccess(data.user);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Network error occurred during authentication.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleQuickDemo = () => {
-    onLoginSuccess({
-      id: 'usr_demo',
-      name: 'Meesho Demo Seller',
-      email: 'seller@meesho-gst.in',
-      businessName: 'Zenith E-Commerce Traders',
-      isLoggedIn: true
-    });
+  const handleQuickDemo = async () => {
+    setErrorMsg(null);
+    setLoading(true);
+
+    const demoEmail = 'seller@meesho-gst.in';
+    const demoPassword = 'Password123!';
+
+    try {
+      // First try login
+      let res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: demoEmail, password: demoPassword }),
+      });
+
+      let data = await res.json();
+
+      // If account doesn't exist, register demo account
+      if (!res.ok || !data.success) {
+        res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: demoEmail,
+            password: demoPassword,
+            name: 'Meesho Demo Seller',
+            businessName: 'Zenith E-Commerce Traders'
+          }),
+        });
+        data = await res.json();
+      }
+
+      if (data.success && data.user) {
+        onLoginSuccess(data.user);
+      } else {
+        setErrorMsg(data.message || 'Failed to authenticate demo account.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Network error connecting to demo account.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -55,7 +112,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
           <div className="flex bg-slate-100 p-1 rounded-xl mb-6">
             <button
               type="button"
-              onClick={() => setIsSignUp(false)}
+              onClick={() => { setIsSignUp(false); setErrorMsg(null); }}
               className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all ${
                 !isSignUp ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
               }`}
@@ -64,7 +121,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
             </button>
             <button
               type="button"
-              onClick={() => setIsSignUp(true)}
+              onClick={() => { setIsSignUp(true); setErrorMsg(null); }}
               className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all ${
                 isSignUp ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
               }`}
@@ -72,6 +129,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
               Create Account
             </button>
           </div>
+
+          {errorMsg && (
+            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start space-x-2 text-rose-700 text-xs">
+              <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
             {isSignUp && (
@@ -140,10 +204,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
 
             <button
               type="submit"
-              className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm rounded-xl shadow-md transition-all flex items-center justify-center space-x-2"
+              disabled={loading}
+              className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm rounded-xl shadow-md transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
             >
-              <span>{isSignUp ? 'Create Account' : 'Sign In to Dashboard'}</span>
-              <ArrowRight className="w-4 h-4" />
+              <span>{loading ? 'Authenticating...' : isSignUp ? 'Create Account' : 'Sign In to Dashboard'}</span>
+              {!loading && <ArrowRight className="w-4 h-4" />}
             </button>
           </form>
 
@@ -157,10 +222,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
           <button
             type="button"
             onClick={handleQuickDemo}
-            className="w-full py-2.5 px-4 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-medium text-xs rounded-xl border border-emerald-200 transition-all flex items-center justify-center space-x-2"
+            disabled={loading}
+            className="w-full py-2.5 px-4 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-medium text-xs rounded-xl border border-emerald-200 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
           >
             <Sparkles className="w-4 h-4 text-emerald-600" />
-            <span>Continue as Guest / Try Demo Mode</span>
+            <span>{loading ? 'Loading Demo...' : 'Continue as Guest / Try Demo Mode'}</span>
           </button>
         </div>
       </div>

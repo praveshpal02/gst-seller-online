@@ -17,7 +17,7 @@ function round2(val: number): number {
 /**
  * Calculates Section 7: B2CS (B2C Small / Everyday consumer sales without GSTIN)
  */
-export function calculateB2cs(
+export function calculateB2csRaw(
   records: MeeshoTransaction[],
   manualEntries: ManualGSTR1Entry[] = [],
   sellerStateCode: string = '07'
@@ -25,8 +25,7 @@ export function calculateB2cs(
   const b2csMap: Record<string, StateGSTR1Summary> = {};
 
   // Build taxable totals from source rows first. Tax is intentionally calculated
-  // after aggregation, not rounded per transaction. This matches the GST Tool
-  // behavior and avoids cumulative one-paise differences.
+  // after aggregation with full precision, not prematurely rounded per group.
   records.forEach((tx) => {
     const taxableVal = Number(tx.taxableValue) || 0;
     const gstRate = Number(tx.gstRate) || 5;
@@ -55,15 +54,20 @@ export function calculateB2cs(
     b2csMap[key].taxableValue += taxableVal * multiplier;
   });
 
-  // Calculate tax from the aggregated taxable amount for each state/rate group.
+  // Calculate tax from the aggregated taxable amount for each state/rate group without premature rounding.
   Object.values(b2csMap).forEach((row) => {
-    const taxable = row.taxableValue;
-    const tax = taxable * (row.gstRate / 100);
-    if (row.type === 'INTER') {
-      row.igstAmount = tax;
+    const taxable = row.taxableValue; // Keep full precision internally
+    const isInterState = row.stateCode !== sellerStateCode;
+    row.type = isInterState ? 'INTER' : 'INTRA';
+
+    if (isInterState) {
+      row.igstAmount = taxable * (row.gstRate / 100);
+      row.cgstAmount = 0;
+      row.sgstAmount = 0;
     } else {
-      row.cgstAmount = tax / 2;
-      row.sgstAmount = tax / 2;
+      row.igstAmount = 0;
+      row.cgstAmount = taxable * (row.gstRate / 200);
+      row.sgstAmount = taxable * (row.gstRate / 200);
     }
     row.totalTax = row.igstAmount + row.cgstAmount + row.sgstAmount;
     row.totalInvoiceValue = taxable + row.totalTax;
@@ -109,17 +113,88 @@ export function calculateB2cs(
   });
 
   return Object.values(b2csMap)
-    .map((r) => ({
-      ...r,
-      taxableValue: round2(r.taxableValue),
-      igstAmount: round2(r.igstAmount),
-      cgstAmount: round2(r.cgstAmount),
-      sgstAmount: round2(r.sgstAmount),
-      totalTax: round2(r.totalTax),
-      totalInvoiceValue: round2(r.totalInvoiceValue)
-    }))
-    .filter((r) => Math.abs(r.taxableValue) > 0.001 || Math.abs(r.totalTax) > 0.001)
+    .filter((r) => Math.abs(r.taxableValue) > 0.0001 || Math.abs(r.totalTax) > 0.0001)
     .sort((a, b) => a.stateCode.localeCompare(b.stateCode));
+}
+
+export function calculateB2cs(
+  records: MeeshoTransaction[],
+  manualEntries: ManualGSTR1Entry[] = [],
+  sellerStateCode: string = '07'
+): StateGSTR1Summary[] {
+  const rawList = calculateB2csRaw(records, manualEntries, sellerStateCode);
+  const targetTaxable = round2(rawList.reduce((acc, r) => acc + r.taxableValue, 0));
+  const targetIgst = round2(rawList.reduce((acc, r) => acc + r.igstAmount, 0));
+  const targetCgst = round2(rawList.reduce((acc, r) => acc + r.cgstAmount, 0));
+  const targetSgst = round2(rawList.reduce((acc, r) => acc + r.sgstAmount, 0));
+  return reconcileB2csList(rawList, targetTaxable, targetIgst, targetCgst, targetSgst);
+}
+
+export function reconcileB2csList(
+  rawList: StateGSTR1Summary[],
+  targetTaxable: number,
+  targetIgst: number,
+  targetCgst: number,
+  targetSgst: number
+): StateGSTR1Summary[] {
+  const list = rawList.map((r) => ({
+    ...r,
+    taxableValue: round2(r.taxableValue),
+    igstAmount: round2(r.igstAmount),
+    cgstAmount: round2(r.cgstAmount),
+    sgstAmount: round2(r.sgstAmount),
+    totalTax: 0,
+    totalInvoiceValue: 0
+  }));
+
+  const reconcileField = (
+    field: 'taxableValue' | 'igstAmount' | 'cgstAmount' | 'sgstAmount',
+    targetSum: number
+  ) => {
+    let currentSum = round2(list.reduce((acc, r) => acc + r[field], 0));
+    let diff = round2(targetSum - currentSum);
+
+    if (Math.abs(diff) < 0.0001) return;
+
+    const step = diff > 0 ? 0.01 : -0.01;
+    let stepsNeeded = Math.round(Math.abs(diff) / 0.01);
+
+    const candidates = list
+      .map((row, idx) => {
+        const rawVal = rawList[idx][field];
+        const roundedVal = row[field];
+        const shift = roundedVal - rawVal;
+        return { idx, rawVal, roundedVal, shift };
+      })
+      .filter((c) => c.rawVal > 0 || c.roundedVal > 0);
+
+    candidates.sort((a, b) => {
+      if (diff < 0) {
+        if (Math.abs(b.shift - a.shift) > 0.00001) return b.shift - a.shift;
+        return b.rawVal - a.rawVal;
+      } else {
+        if (Math.abs(a.shift - b.shift) > 0.00001) return a.shift - b.shift;
+        return b.rawVal - a.rawVal;
+      }
+    });
+
+    for (let i = 0; i < stepsNeeded && i < candidates.length; i++) {
+      const idx = candidates[i].idx;
+      list[idx][field] = round2(list[idx][field] + step);
+    }
+  };
+
+  reconcileField('taxableValue', targetTaxable);
+  reconcileField('igstAmount', targetIgst);
+  reconcileField('cgstAmount', targetCgst);
+  reconcileField('sgstAmount', targetSgst);
+
+  list.forEach((r) => {
+    r.totalTax = round2(r.igstAmount + r.cgstAmount + r.sgstAmount);
+    r.totalInvoiceValue = round2(r.taxableValue + r.totalTax);
+  });
+
+  return list;
 }
 
 function extractDocPrefixAndNum(docStr: string) {
@@ -527,21 +602,30 @@ export function calculateGstr1Summary(
   operatorGstin: string = '07AARCM9332R1CQ',
   sellerStateCode: string = '07'
 ): GSTR1CompleteReport {
-  const b2csList = calculateB2cs(records, manualEntries, sellerStateCode);
+  const rawB2csList = calculateB2csRaw(records, manualEntries, sellerStateCode);
   const docIssue = calculateDocumentsIssued(records, manualEntries);
 
-  const totalTaxable = round2(b2csList.reduce((acc, curr) => acc + curr.taxableValue, 0));
-  const totalIgst = round2(b2csList.reduce((acc, curr) => acc + curr.igstAmount, 0));
-  const totalCgst = round2(b2csList.reduce((acc, curr) => acc + curr.cgstAmount, 0));
-  const totalSgst = round2(b2csList.reduce((acc, curr) => acc + curr.sgstAmount, 0));
-  const totalInvoiceValue = round2(b2csList.reduce((acc, curr) => acc + curr.totalInvoiceValue, 0));
+  // Aggregate unrounded sums from raw state groups to preserve numeric precision
+  const rawTotalTaxable = rawB2csList.reduce((acc, curr) => acc + curr.taxableValue, 0);
+  const rawTotalIgst = rawB2csList.reduce((acc, curr) => acc + curr.igstAmount, 0);
+  const rawTotalCgst = rawB2csList.reduce((acc, curr) => acc + curr.cgstAmount, 0);
+  const rawTotalSgst = rawB2csList.reduce((acc, curr) => acc + curr.sgstAmount, 0);
+  const rawTotalInvoiceValue = rawB2csList.reduce((acc, curr) => acc + curr.totalInvoiceValue, 0);
+
+  const totalTaxable = round2(rawTotalTaxable);
+  const totalIgst = round2(rawTotalIgst);
+  const totalCgst = round2(rawTotalCgst);
+  const totalSgst = round2(rawTotalSgst);
+  const totalInvoiceValue = round2(rawTotalInvoiceValue);
   const totalTax = round2(totalIgst + totalCgst + totalSgst);
 
+  const b2csList = reconcileB2csList(rawB2csList, totalTaxable, totalIgst, totalCgst, totalSgst);
+
   const ecoSummary = calculateEcommerceOperator(
-    totalTaxable,
-    totalIgst,
-    totalCgst,
-    totalSgst,
+    rawTotalTaxable,
+    rawTotalIgst,
+    rawTotalCgst,
+    rawTotalSgst,
     records.length,
     operatorGstin,
     'Meesho (Fashnear Technologies Private Limited)',

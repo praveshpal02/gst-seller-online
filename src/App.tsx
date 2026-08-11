@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { UserProfile, GSTINProfile, MeeshoTransaction } from './types';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
@@ -11,75 +11,198 @@ import { AuthModal } from './components/AuthModal';
 import { HelpGuide } from './components/HelpGuide';
 
 export default function App() {
-  const [user, setUser] = useState<UserProfile | null>({
-    id: 'usr_default',
-    name: 'Pravesh Pal',
-    email: 'praveshpal02@gmail.com',
-    businessName: 'Zenith E-Commerce Traders',
-    isLoggedIn: true
-  });
-
-  const [profiles, setProfiles] = useState<GSTINProfile[]>(() => {
-    try {
-      const saved = localStorage.getItem('gstin_profiles');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
-
-  const [activeProfile, setActiveProfile] = useState<GSTINProfile | null>(() => {
-    try {
-      const savedProfiles = localStorage.getItem('gstin_profiles');
-      const profilesArr: GSTINProfile[] = savedProfiles ? JSON.parse(savedProfiles) : [];
-      const activeId = localStorage.getItem('active_gstin_id');
-      return profilesArr.find(p => p.id === activeId || p.isActive) || null;
-    } catch (e) {
-      return null;
-    }
-  });
-
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
+  const [profiles, setProfiles] = useState<GSTINProfile[]>([]);
+  const [activeProfile, setActiveProfile] = useState<GSTINProfile | null>(null);
   const [activeTab, setActiveTab] = useState<string>('import');
   const [transactions, setTransactions] = useState<MeeshoTransaction[]>([]);
   const [isHelpGuideOpen, setIsHelpGuideOpen] = useState<boolean>(false);
 
-  const getTxStorageKey = (gstin?: string, month?: string, year?: string, marketplace = 'MEESHO') => {
-    if (!gstin || !month || !year) return null;
-    return `gst_tx_${gstin}_${month.toLowerCase()}_${year}_${marketplace.toUpperCase()}`;
-  };
+  // 1. Check existing authenticated session on startup
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/auth/me')
+      .then((res) => res.json())
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.success && data.user) {
+          setUser(data.user);
+        } else {
+          setUser(null);
+        }
+      })
+      .catch(() => {
+        if (isMounted) setUser(null);
+      })
+      .finally(() => {
+        if (isMounted) setIsAuthChecking(false);
+      });
 
-  React.useEffect(() => {
-    if (activeProfile?.gstin && activeProfile?.periodMonth && activeProfile?.periodYear) {
-      const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-      if (key) {
-        try {
-          const saved = localStorage.getItem(key);
-          if (saved) {
-            setTransactions(JSON.parse(saved));
-            return;
+    return () => { isMounted = false; };
+  }, []);
+
+  // 2. Perform one-time migration from LocalStorage if needed
+  const performLocalStorageMigration = async () => {
+    try {
+      const migrationDone = localStorage.getItem('gst_migrated_to_neon_v1');
+      if (migrationDone === 'true') return;
+
+      const localProfilesRaw = localStorage.getItem('gstin_profiles');
+      const localProfiles: GSTINProfile[] = localProfilesRaw ? JSON.parse(localProfilesRaw) : [];
+
+      const transactionsGrouped: Record<string, any> = {};
+
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('gst_tx_')) {
+          const parts = key.split('_'); // gst, tx, gstin, month, year, marketplace
+          if (parts.length >= 6) {
+            const gstin = parts[2];
+            const periodMonth = parts[3];
+            const periodYear = parts[4];
+            try {
+              const txs = JSON.parse(localStorage.getItem(key) || '[]');
+              if (Array.isArray(txs) && txs.length > 0) {
+                transactionsGrouped[key] = { gstin, periodMonth, periodYear, transactions: txs };
+              }
+            } catch (e) {
+              console.error('Migration error reading key', key, e);
+            }
           }
-        } catch (e) {
-          console.error('Error loading transactions:', e);
         }
       }
-    }
-    setTransactions([]);
-  }, [activeProfile?.gstin, activeProfile?.periodMonth, activeProfile?.periodYear]);
 
-  const handleDataImported = (imported: MeeshoTransaction[]) => {
-    setTransactions(imported);
-    if (activeProfile?.gstin && activeProfile?.periodMonth && activeProfile?.periodYear) {
-      const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-      if (key) {
-        try {
-          localStorage.setItem(key, JSON.stringify(imported));
-        } catch (e) {
-          console.error('Error storing transactions:', e);
-        }
+      if (localProfiles.length > 0 || Object.keys(transactionsGrouped).length > 0) {
+        await fetch('/api/migrate-local-data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profiles: localProfiles, transactionsGrouped }),
+        });
       }
+
+      localStorage.setItem('gst_migrated_to_neon_v1', 'true');
+    } catch (err) {
+      console.error('Failed LocalStorage migration:', err);
     }
   };
 
+  // 3. Load user profiles from DB when authenticated
+  useEffect(() => {
+    if (!user) {
+      setProfiles([]);
+      setActiveProfile(null);
+      setTransactions([]);
+      return;
+    }
+
+    let isMounted = true;
+
+    const loadUserData = async () => {
+      await performLocalStorageMigration();
+
+      try {
+        const res = await fetch('/api/profiles');
+        const data = await res.json();
+        if (!isMounted) return;
+
+        if (data.success && Array.isArray(data.profiles) && data.profiles.length > 0) {
+          const fetchedProfiles: GSTINProfile[] = data.profiles;
+          setProfiles(fetchedProfiles);
+          const active = fetchedProfiles.find((p) => p.isActive) || fetchedProfiles[0];
+          setActiveProfile(active);
+        } else {
+          // Default profile if none exist
+          const defaultProf: GSTINProfile = {
+            id: `gstin_${Date.now()}`,
+            gstin: '07AARCM9332R1CQ',
+            tradeName: user.businessName || 'Zenith E-Commerce Traders',
+            partyName: user.name,
+            returnType: 'Monthly',
+            periodMonth: 'July',
+            periodYear: '2026',
+            isActive: true,
+            addedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
+            lastUsedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
+            stateCode: '07',
+            stateName: 'Delhi'
+          };
+          setProfiles([defaultProf]);
+          setActiveProfile(defaultProf);
+
+          // Save default profile to DB
+          await fetch('/api/profiles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile: defaultProf }),
+          });
+        }
+      } catch (err) {
+        console.error('Failed loading seller profiles from database:', err);
+      }
+    };
+
+    loadUserData();
+
+    return () => { isMounted = false; };
+  }, [user?.id]);
+
+  // 4. Load transactions for activeProfile from DB (Source of Truth)
+  useEffect(() => {
+    if (!user || !activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) {
+      setTransactions([]);
+      return;
+    }
+
+    let isMounted = true;
+    const query = new URLSearchParams({
+      gstin: activeProfile.gstin,
+      periodMonth: activeProfile.periodMonth,
+      periodYear: activeProfile.periodYear
+    });
+
+    fetch(`/api/transactions?${query.toString()}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.success && Array.isArray(data.transactions)) {
+          setTransactions(data.transactions);
+        } else {
+          setTransactions([]);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed fetching transactions from database:', err);
+        if (isMounted) setTransactions([]);
+      });
+
+    return () => { isMounted = false; };
+  }, [user?.id, activeProfile?.gstin, activeProfile?.periodMonth, activeProfile?.periodYear]);
+
+  // Handle imported transactions
+  const handleDataImported = async (imported: MeeshoTransaction[]) => {
+    setTransactions(imported);
+    if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
+
+    try {
+      await fetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gstin: activeProfile.gstin,
+          periodMonth: activeProfile.periodMonth,
+          periodYear: activeProfile.periodYear,
+          marketplace: 'MEESHO',
+          transactions: imported,
+          overwrite: true
+        })
+      });
+    } catch (e) {
+      console.error('Failed saving transactions to database:', e);
+    }
+  };
+
+  // Handle delete import session
   const handleDeleteMeeshoImport = async (): Promise<boolean> => {
     if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) {
       return false;
@@ -90,7 +213,6 @@ export default function App() {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: user?.id || 'usr_default',
           gstin: activeProfile.gstin,
           periodMonth: activeProfile.periodMonth,
           periodYear: activeProfile.periodYear,
@@ -98,16 +220,10 @@ export default function App() {
         })
       });
 
-      if (!response.ok) {
-        return false;
-      }
+      if (!response.ok) return false;
 
       const resData = await response.json();
       if (resData.success) {
-        const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-        if (key) {
-          localStorage.removeItem(key);
-        }
         setTransactions([]);
         return true;
       }
@@ -118,148 +234,164 @@ export default function App() {
     }
   };
 
-  const handleDeleteTransaction = (id: string) => {
-    setTransactions((prev) => {
-      const updated = prev.filter((t) => t.id !== id);
-      if (activeProfile?.gstin && activeProfile?.periodMonth && activeProfile?.periodYear) {
-        const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-        if (key) {
-          try {
-            if (updated.length > 0) {
-              localStorage.setItem(key, JSON.stringify(updated));
-            } else {
-              localStorage.removeItem(key);
-            }
-          } catch (e) {
-            console.error(e);
-          }
-        }
-      }
-      return updated;
-    });
+  // Delete single transaction
+  const handleDeleteTransaction = async (id: string) => {
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+    try {
+      await fetch('/api/transactions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+    } catch (e) {
+      console.error('Failed to delete transaction from DB:', e);
+    }
   };
 
+  // Clear all transactions for session
   const handleClearAllTransactions = async () => {
-    if (activeProfile?.gstin && activeProfile?.periodMonth && activeProfile?.periodYear) {
-      const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-      if (key) {
-        localStorage.removeItem(key);
-      }
-      try {
-        await fetch('/api/meesho-import', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: user?.id || 'usr_default',
-            gstin: activeProfile.gstin,
-            periodMonth: activeProfile.periodMonth,
-            periodYear: activeProfile.periodYear,
-            marketplace: 'MEESHO'
-          })
-        });
-      } catch (e) {
-        console.error('Error clearing backend import:', e);
-      }
+    setTransactions([]);
+    if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
+
+    try {
+      await fetch('/api/transactions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gstin: activeProfile.gstin,
+          periodMonth: activeProfile.periodMonth,
+          periodYear: activeProfile.periodYear
+        })
+      });
+    } catch (e) {
+      console.error('Error clearing backend transactions:', e);
     }
+  };
+
+  // Update single transaction
+  const handleUpdateTransaction = async (updatedTx: MeeshoTransaction) => {
+    setTransactions((prev) => prev.map((t) => (t.id === updatedTx.id ? updatedTx : t)));
+    if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
+
+    try {
+      await fetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gstin: activeProfile.gstin,
+          periodMonth: activeProfile.periodMonth,
+          periodYear: activeProfile.periodYear,
+          marketplace: 'MEESHO',
+          transactions: [updatedTx],
+          overwrite: false
+        })
+      });
+    } catch (e) {
+      console.error('Failed to update transaction in DB:', e);
+    }
+  };
+
+  // Add manual transaction
+  const handleAddManualTransaction = async (tx: MeeshoTransaction) => {
+    setTransactions((prev) => [tx, ...prev]);
+    if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
+
+    try {
+      await fetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gstin: activeProfile.gstin,
+          periodMonth: activeProfile.periodMonth,
+          periodYear: activeProfile.periodYear,
+          marketplace: 'MEESHO',
+          transactions: [tx],
+          overwrite: false
+        })
+      });
+    } catch (e) {
+      console.error('Failed to add manual transaction in DB:', e);
+    }
+  };
+
+  // Save profile
+  const handleSaveProfile = async (profileToSave: GSTINProfile) => {
+    const updatedProfile = { ...profileToSave, isActive: true };
+    setProfiles((prev) => {
+      const exists = prev.some((p) => p.id === profileToSave.id || p.gstin === profileToSave.gstin);
+      if (exists) {
+        return prev.map((p) =>
+          p.id === profileToSave.id || p.gstin === profileToSave.gstin
+            ? updatedProfile
+            : { ...p, isActive: false }
+        );
+      }
+      return [updatedProfile, ...prev.map((p) => ({ ...p, isActive: false }))];
+    });
+    setActiveProfile(updatedProfile);
+
+    try {
+      await fetch('/api/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: updatedProfile }),
+      });
+    } catch (e) {
+      console.error('Failed to save profile in DB:', e);
+    }
+  };
+
+  // Select profile
+  const handleSelectProfile = async (prof: GSTINProfile) => {
+    const updatedProf = {
+      ...prof,
+      isActive: true,
+      lastUsedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-')
+    };
+
+    setProfiles((prev) =>
+      prev.map((p) => ({
+        ...p,
+        isActive: p.id === prof.id,
+        lastUsedDate: p.id === prof.id ? updatedProf.lastUsedDate : p.lastUsedDate
+      }))
+    );
+    setActiveProfile(updatedProf);
+
+    try {
+      await fetch('/api/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: updatedProf }),
+      });
+    } catch (e) {
+      console.error('Failed to select profile in DB:', e);
+    }
+  };
+
+  // Logout
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {
+      console.error('Logout error:', e);
+    }
+    setUser(null);
+    setProfiles([]);
+    setActiveProfile(null);
     setTransactions([]);
   };
 
-  const handleUpdateTransaction = (updatedTx: MeeshoTransaction) => {
-    setTransactions((prev) => {
-      const updated = prev.map((t) => (t.id === updatedTx.id ? updatedTx : t));
-      if (activeProfile?.gstin && activeProfile?.periodMonth && activeProfile?.periodYear) {
-        const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-        if (key) {
-          try {
-            localStorage.setItem(key, JSON.stringify(updated));
-          } catch (e) {
-            console.error(e);
-          }
-        }
-      }
-      return updated;
-    });
-  };
-
-  const handleAddManualTransaction = (tx: MeeshoTransaction) => {
-    setTransactions((prev) => {
-      const updated = [tx, ...prev];
-      if (activeProfile?.gstin && activeProfile?.periodMonth && activeProfile?.periodYear) {
-        const key = getTxStorageKey(activeProfile.gstin, activeProfile.periodMonth, activeProfile.periodYear, 'MEESHO');
-        if (key) {
-          try {
-            localStorage.setItem(key, JSON.stringify(updated));
-          } catch (e) {
-            console.error(e);
-          }
-        }
-      }
-      return updated;
-    });
-  };
-
-  const handleSaveProfile = (profileToSave: GSTINProfile) => {
-    setProfiles((prev) => {
-      const exists = prev.some((p) => p.id === profileToSave.id || p.gstin === profileToSave.gstin);
-      let updatedList: GSTINProfile[];
-      if (exists) {
-        updatedList = prev.map((p) =>
-          p.id === profileToSave.id || p.gstin === profileToSave.gstin
-            ? { ...profileToSave, isActive: true }
-            : { ...p, isActive: false }
-        );
-      } else {
-        updatedList = [
-          { ...profileToSave, isActive: true },
-          ...prev.map((p) => ({ ...p, isActive: false }))
-        ];
-      }
-      try {
-        localStorage.setItem('gstin_profiles', JSON.stringify(updatedList));
-        localStorage.setItem('active_gstin_id', profileToSave.id);
-      } catch (e) {
-        console.error(e);
-      }
-      return updatedList;
-    });
-    setActiveProfile({ ...profileToSave, isActive: true });
-  };
-
-  const handleSelectProfile = (prof: GSTINProfile) => {
-    setProfiles((prev) => {
-      const updated = prev.map((p) => ({
-        ...p,
-        isActive: p.id === prof.id,
-        lastUsedDate: p.id === prof.id ? new Date().toLocaleDateString('en-GB').replace(/\//g, '-') : p.lastUsedDate
-      }));
-      try {
-        localStorage.setItem('gstin_profiles', JSON.stringify(updated));
-        localStorage.setItem('active_gstin_id', prof.id);
-      } catch (e) {
-        console.error(e);
-      }
-      return updated;
-    });
-    setActiveProfile({ ...prof, isActive: true, lastUsedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-') });
-  };
-
-  // Calculate dynamic high-density KPIs
-  const grossSales = transactions
-    .filter(t => t.type === 'Sales')
-    .reduce((acc, t) => acc + t.grossAmount, 0);
-
-  const totalGstLiability = transactions
-    .filter(t => t.type === 'Sales')
-    .reduce((acc, t) => acc + t.igstAmount + t.cgstAmount + t.sgstAmount, 0);
-
-  const totalReturnsValue = transactions
-    .filter(t => t.type === 'Return')
-    .reduce((acc, t) => acc + t.grossAmount, 0);
-
-  const totalTcsClaimable = transactions.reduce((acc, t) => {
-    const net = t.type === 'Sales' ? (t.tcsIgst + t.tcsCgst + t.tcsSgst) : -(t.tcsIgst + t.tcsCgst + t.tcsSgst);
-    return acc + net;
-  }, 0);
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">
+        <div className="flex flex-col items-center space-y-3">
+          <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+          <span className="text-sm font-medium text-slate-300">Connecting to GST Database Engine...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans antialiased flex flex-col">
@@ -271,7 +403,7 @@ export default function App() {
         activeProfile={activeProfile}
         activeTab={activeTab}
         user={user}
-        onLogout={() => setUser(null)}
+        onLogout={handleLogout}
         onSelectProfileClick={() => setActiveTab('profile')}
       />
 
@@ -288,59 +420,6 @@ export default function App() {
         {/* Central Work Area */}
         <main className="flex-1 flex flex-col space-y-6 min-w-0">
           
-          {/* High Density Summary KPI Cards Header Banner (Only when active profile and transactions exist) */}
-          {activeProfile && transactions.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-                <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">
-                  Gross Sales ({activeProfile ? `${activeProfile.periodMonth} ${activeProfile.periodYear}` : 'No Period'})
-                </span>
-                <div className="text-xl md:text-2xl font-extrabold text-slate-900 mt-2 font-mono">
-                  ₹{grossSales.toLocaleString('en-IN')}
-                </div>
-                <span className="text-[10px] text-slate-400 mt-1 font-medium">
-                  {transactions.filter(t => t.type === 'Sales').length} Outward Sales
-                </span>
-              </div>
-
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-                <span className="text-[10px] font-extrabold text-rose-500 uppercase tracking-wider">
-                  Returns Deducted
-                </span>
-                <div className="text-xl md:text-2xl font-extrabold text-rose-600 mt-2 font-mono">
-                  ₹{totalReturnsValue.toLocaleString('en-IN')}
-                </div>
-                <span className="text-[10px] text-slate-400 mt-1 font-medium">
-                  {transactions.filter(t => t.type === 'Return').length} Credit Notes
-                </span>
-              </div>
-
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-                <span className="text-[10px] font-extrabold text-blue-600 uppercase tracking-wider">
-                  GST Tax Liability
-                </span>
-                <div className="text-xl md:text-2xl font-extrabold text-blue-700 mt-2 font-mono">
-                  ₹{totalGstLiability.toLocaleString('en-IN')}
-                </div>
-                <span className="text-[10px] text-blue-500 mt-1 font-medium">
-                  IGST + CGST + SGST
-                </span>
-              </div>
-
-              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-                <span className="text-[10px] font-extrabold text-purple-600 uppercase tracking-wider">
-                  TCS Claimable (1%)
-                </span>
-                <div className="text-xl md:text-2xl font-extrabold text-purple-700 mt-2 font-mono">
-                  ₹{totalTcsClaimable.toLocaleString('en-IN')}
-                </div>
-                <span className="text-[10px] text-purple-500 mt-1 font-medium">
-                  Cash Ledger Credit
-                </span>
-              </div>
-            </div>
-          )}
-
           {/* Active Tab Component */}
           <div className="flex-1">
             {activeTab === 'profile' && (
@@ -409,7 +488,7 @@ export default function App() {
             <div className="flex items-center space-x-3 text-slate-600">
               <span className="flex items-center text-xs font-semibold text-emerald-700">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse mr-2"></span>
-                Meesho GST Engine Connected
+                Neon PostgreSQL Database Active
               </span>
               <span className="text-slate-300">|</span>
               <span className="text-slate-500 font-mono text-[11px]">
