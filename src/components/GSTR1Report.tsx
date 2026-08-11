@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { authFetch } from '../utils/api';
 import { MeeshoTransaction, StateGSTR1Summary, HSNSummary, ManualGSTR1Entry, EcommerceOperatorSummary } from '../types';
 import {
   FileText,
@@ -15,6 +16,8 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { exportGstr1Excel } from '../utils/gstr1Exporter';
+import JSZip from 'jszip';
 import { NoDataState } from './NoDataState';
 import { calculateGstr1Summary } from '../utils/gstr1Calculator';
 
@@ -115,7 +118,7 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
     if (!gstin || !periodMonth || !periodYear) return;
     let isMounted = true;
     const query = new URLSearchParams({ gstin, periodMonth, periodYear });
-    fetch(`/api/manual-entries?${query.toString()}`)
+    authFetch(`/api/manual-entries?${query.toString()}`)
       .then((res) => res.json())
       .then((data) => {
         if (!isMounted) return;
@@ -256,8 +259,8 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
     return `${m}${y}`;
   };
 
-  // Export JSON (GST Portal official format)
-  const handleExportJSON = () => {
+  // Export JSON (GST Portal official format - Minified & Compressed)
+  const handleExportJSON = async (asZip: boolean = false) => {
     const sellerState = gstin ? gstin.substring(0, 2) : '07';
     const fpStr = formatFilingPeriod(periodMonth, periodYear);
 
@@ -433,78 +436,43 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
     console.log('GSTIN:', payload.gstin);
     console.log('b2cs records count in JSON:', payload.b2cs.length);
     console.log('doc_issue categories count in JSON:', payload.doc_issue.doc_det.length);
-    console.log('doc_issue details:', JSON.stringify(payload.doc_issue.doc_det, null, 2));
 
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(payload, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute('href', dataStr);
-    downloadAnchor.setAttribute('download', `GSTR1_${gstin || 'GSTIN'}_${periodMonth}_${periodYear}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+    // Minified JSON (no indentation/whitespace) for compressed size
+    const jsonString = JSON.stringify(payload);
+    const fileName = `GSTR1_${gstin || 'GSTIN'}_${periodMonth}_${periodYear}`;
+
+    if (asZip) {
+      const zip = new JSZip();
+      zip.file(`${fileName}.json`, jsonString);
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 9 }
+      });
+      const url = URL.createObjectURL(zipBlob);
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute('href', url);
+      downloadAnchor.setAttribute('download', `${fileName}.zip`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      URL.revokeObjectURL(url);
+    } else {
+      const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute('href', url);
+      downloadAnchor.setAttribute('download', `${fileName}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      URL.revokeObjectURL(url);
+    }
   };
 
   // Export Excel
   const handleExportExcel = () => {
-    const wb = XLSX.utils.book_new();
-
-    // B2CS Sheet
-    const b2csSheetData = report.b2csList.map(b => ({
-      'State Code': b.stateCode,
-      'Place of Supply (State)': b.stateName,
-      'Supply Type': b.type,
-      'GST Rate (%)': b.gstRate,
-      'Taxable Value (₹)': b.taxableValue,
-      'IGST Amount (₹)': b.igstAmount,
-      'CGST Amount (₹)': b.cgstAmount,
-      'SGST Amount (₹)': b.sgstAmount,
-      'Total Tax (₹)': b.totalTax,
-      'Invoice Value (₹)': b.totalInvoiceValue
-    }));
-    const b2csSheet = XLSX.utils.json_to_sheet(b2csSheetData);
-    XLSX.utils.book_append_sheet(wb, b2csSheet, 'B2CS Summary (Sec 7)');
-
-    // Documents Issued
-    const docSheetData = [{
-      'Document Type': 'Invoices / Credit Notes Outward',
-      'Total Documents': report.docIssue.totalDocs,
-      'Cancelled / Credit Notes': report.docIssue.cancelledDocs,
-      'Net Issued Documents': report.docIssue.netIssuedDocs
-    }];
-    const docSheet = XLSX.utils.json_to_sheet(docSheetData);
-    XLSX.utils.book_append_sheet(wb, docSheet, 'Documents Issued (Sec 13)');
-
-    // Section 14 ECO
-    const ecoSheetData = effectiveTable14.map(e => ({
-      'Marketplace / ECO': e.portalName,
-      'Operator GSTIN': e.operatorGstin,
-      'Net Taxable Supplies (₹)': e.netTaxableValue,
-      'IGST (₹)': e.igstAmount,
-      'CGST (₹)': e.cgstAmount,
-      'SGST (₹)': e.sgstAmount,
-      'Total Tax (₹)': e.totalTax
-    }));
-    const ecoSheet = XLSX.utils.json_to_sheet(ecoSheetData);
-    XLSX.utils.book_append_sheet(wb, ecoSheet, 'ECO Supplies (Sec 14)');
-
-    // HSN Summary if enabled
-    if (hsnToggle) {
-      const hsnSheetData = report.hsnList.map(h => ({
-        'HSN Code': h.hsnCode,
-        'Description': h.description,
-        'UQC': h.uqc,
-        'Total Qty': h.totalQty,
-        'Total Value (₹)': h.totalValue,
-        'Taxable Value (₹)': h.taxableValue,
-        'IGST (₹)': h.igstAmount,
-        'CGST (₹)': h.cgstAmount,
-        'SGST (₹)': h.sgstAmount
-      }));
-      const hsnSheet = XLSX.utils.json_to_sheet(hsnSheetData);
-      XLSX.utils.book_append_sheet(wb, hsnSheet, 'HSN Summary (Sec 12)');
-    }
-
-    XLSX.writeFile(wb, `GSTR1_Report_${gstin || 'GSTIN'}_${periodMonth}_${periodYear}.xlsx`);
+    exportGstr1Excel(report, effectiveTable14, gstin, periodMonth, periodYear, hsnToggle);
   };
 
   // Auto-fill taxes on manual B2CS entry modal
@@ -1032,11 +1000,21 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
           </button>
 
           <button
-            onClick={handleExportJSON}
+            onClick={() => handleExportJSON(false)}
             className="py-3 px-5 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center space-x-2"
+            title="Download minified compressed GSTR-1 JSON"
           >
             <Code className="w-4 h-4" />
-            <span>GSTR1 JSON Download</span>
+            <span>GSTR1 Compressed JSON (.json)</span>
+          </button>
+
+          <button
+            onClick={() => handleExportJSON(true)}
+            className="py-3 px-5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center space-x-2"
+            title="Download DEFLATE compressed GSTR-1 ZIP archive for GST Portal upload"
+          >
+            <Download className="w-4 h-4" />
+            <span>GSTR1 Compressed ZIP (.zip)</span>
           </button>
         </div>
       </div>

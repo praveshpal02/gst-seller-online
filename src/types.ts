@@ -89,6 +89,7 @@ export interface HSNSummary {
   hsnCode: string;
   description: string;
   uqc: string; // Unit Quantity Code e.g. NOS, PCS
+  gstRate?: number;
   totalQty: number;
   totalValue: number;
   taxableValue: number;

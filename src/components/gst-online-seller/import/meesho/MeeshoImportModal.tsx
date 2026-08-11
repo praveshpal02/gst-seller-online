@@ -5,6 +5,7 @@ import { validateTcsSales, validateTcsSalesReturn, validateTaxInvoiceDetails, Fi
 import { parseMeeshoExcelFiles, calculateMeeshoImportSummary } from '../../../../utils/excelParser';
 import { MeeshoTransaction } from '../../../../types';
 import { generateSampleMeeshoTransactions } from '../../../../data/sampleMeeshoData';
+import { authFetch } from '../../../../utils/api';
 
 interface MeeshoImportModalProps {
   isOpen: boolean;
@@ -184,7 +185,7 @@ export const MeeshoImportModal: React.FC<MeeshoImportModalProps> = ({
 
       // 2. Register file upload metadata in backend DB
       try {
-        await fetch('/api/meesho-import', {
+        await authFetch('/api/meesho-import', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

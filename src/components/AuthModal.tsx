@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, User, Lock, Mail, Building, ArrowRight, Sparkles, AlertCircle } from 'lucide-react';
 import { UserProfile } from '../types';
+import { authFetch, setStoredSessionId } from '../utils/api';
 
 interface AuthModalProps {
   onLoginSuccess: (user: UserProfile) => void;
@@ -8,10 +9,10 @@ interface AuthModalProps {
 
 export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
   const [isSignUp, setIsSignUp] = useState(false);
-  const [email, setEmail] = useState('seller@meeshostore.com');
-  const [password, setPassword] = useState('password123');
-  const [businessName, setBusinessName] = useState('Zenith Traders');
-  const [fullName, setFullName] = useState('Pravesh Pal');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [businessName, setBusinessName] = useState('');
+  const [fullName, setFullName] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
@@ -26,7 +27,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
       : { email, password };
 
     try {
-      const res = await fetch(endpoint, {
+      const res = await authFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -37,6 +38,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
         setErrorMsg(data.message || 'Authentication failed. Please check your credentials.');
         setLoading(false);
         return;
+      }
+
+      if (data.sessionId) {
+        setStoredSessionId(data.sessionId);
       }
 
       onLoginSuccess(data.user);
@@ -56,7 +61,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
 
     try {
       // First try login
-      let res = await fetch('/api/auth/login', {
+      let res = await authFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: demoEmail, password: demoPassword }),
@@ -66,7 +71,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
 
       // If account doesn't exist, register demo account
       if (!res.ok || !data.success) {
-        res = await fetch('/api/auth/register', {
+        res = await authFetch('/api/auth/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -80,6 +85,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onLoginSuccess }) => {
       }
 
       if (data.success && data.user) {
+        if (data.sessionId) {
+          setStoredSessionId(data.sessionId);
+        }
         onLoginSuccess(data.user);
       } else {
         setErrorMsg(data.message || 'Failed to authenticate demo account.');

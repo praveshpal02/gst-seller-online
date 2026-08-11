@@ -251,7 +251,19 @@ async function startServer() {
         return res.status(400).json({ success: false, message: "Missing required profile fields." });
       }
 
-      const profileId = profile.id || `gstin_${Date.now()}`;
+      // Check if user already has a profile for this GSTIN
+      const existingGstinRes = await pool.query(
+        `SELECT id FROM seller_profiles WHERE user_id = $1 AND UPPER(gstin) = UPPER($2)`,
+        [user.id, profile.gstin]
+      );
+
+      let rawId = profile.id;
+      if (existingGstinRes.rows.length > 0) {
+        rawId = existingGstinRes.rows[0].id;
+      } else if (!rawId) {
+        rawId = `gstin_${Date.now()}`;
+      }
+      const profileId = rawId.startsWith(`u_${user.id}_`) ? rawId : `u_${user.id}_${rawId}`;
 
       // If set active, set other profiles for this user to inactive
       if (profile.isActive) {
@@ -285,8 +297,8 @@ async function startServer() {
           profile.tradeName,
           profile.partyName || null,
           profile.returnType || 'Monthly',
-          profile.periodMonth,
-          profile.periodYear,
+          profile.periodMonth || 'July',
+          profile.periodYear || '2026',
           !!profile.isActive,
           profile.stateCode || null,
           profile.stateName || null,
@@ -328,16 +340,36 @@ async function startServer() {
       }
 
       const { gstin, periodMonth, periodYear } = req.query;
-      if (!gstin || !periodMonth || !periodYear) {
-        return res.status(400).json({ success: false, message: "Missing required query parameters." });
+      if (!gstin) {
+        return res.status(400).json({ success: false, message: "Missing required query parameter gstin." });
       }
 
-      const txRes = await pool.query(
-        `SELECT data FROM meesho_transactions
-         WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)
-         ORDER BY created_at ASC`,
-        [user.id, String(gstin), String(periodMonth), String(periodYear)]
-      );
+      let txRes;
+      if (periodMonth && periodYear) {
+        txRes = await pool.query(
+          `SELECT data FROM meesho_transactions
+           WHERE user_id = $1 AND UPPER(gstin) = UPPER($2) AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)
+           ORDER BY created_at ASC`,
+          [user.id, String(gstin), String(periodMonth), String(periodYear)]
+        );
+
+        // Fallback: If no records match exact month/year string, search by user & GSTIN
+        if (txRes.rows.length === 0) {
+          txRes = await pool.query(
+            `SELECT data FROM meesho_transactions
+             WHERE user_id = $1 AND UPPER(gstin) = UPPER($2)
+             ORDER BY created_at ASC`,
+            [user.id, String(gstin)]
+          );
+        }
+      } else {
+        txRes = await pool.query(
+          `SELECT data FROM meesho_transactions
+           WHERE user_id = $1 AND UPPER(gstin) = UPPER($2)
+           ORDER BY created_at ASC`,
+          [user.id, String(gstin)]
+        );
+      }
 
       const transactions = txRes.rows.map(row => row.data);
       return res.json({ success: true, transactions });
@@ -366,17 +398,24 @@ async function startServer() {
         if (overwrite) {
           await client.query(
             `DELETE FROM meesho_transactions
-             WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
+             WHERE user_id = $1 AND UPPER(gstin) = UPPER($2) AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
             [user.id, String(gstin), String(periodMonth), String(periodYear)]
           );
         }
 
         for (const tx of transactions) {
-          const txId = tx.id || `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          const rawTxId = tx.id || `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          const txId = rawTxId.startsWith(`u_${user.id}_`) ? rawTxId : `u_${user.id}_${rawTxId}`;
+
           await client.query(
             `INSERT INTO meesho_transactions (id, user_id, gstin, period_month, period_year, marketplace, data)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, user_id = EXCLUDED.user_id, gstin = EXCLUDED.gstin, period_month = EXCLUDED.period_month, period_year = EXCLUDED.period_year`,
+             ON CONFLICT (id) DO UPDATE SET
+               data = EXCLUDED.data,
+               user_id = EXCLUDED.user_id,
+               gstin = EXCLUDED.gstin,
+               period_month = EXCLUDED.period_month,
+               period_year = EXCLUDED.period_year`,
             [txId, user.id, String(gstin), String(periodMonth), String(periodYear), String(marketplace), JSON.stringify(tx)]
           );
         }
@@ -404,15 +443,19 @@ async function startServer() {
       const { gstin, periodMonth, periodYear, id } = req.body;
 
       if (id) {
-        await pool.query(`DELETE FROM meesho_transactions WHERE id = $1 AND user_id = $2`, [id, user.id]);
+        const prefixedId = `u_${user.id}_${id}`;
+        await pool.query(
+          `DELETE FROM meesho_transactions WHERE (id = $1 OR id = $2) AND user_id = $3`,
+          [id, prefixedId, user.id]
+        );
         return res.json({ success: true, message: "Transaction deleted." });
       }
 
       if (gstin && periodMonth && periodYear) {
         await pool.query(
           `DELETE FROM meesho_transactions
-           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
-          [user.id, gstin, String(periodMonth), String(periodYear)]
+           WHERE user_id = $1 AND UPPER(gstin) = UPPER($2) AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
+          [user.id, String(gstin), String(periodMonth), String(periodYear)]
         );
         return res.json({ success: true, message: "All transactions cleared for session." });
       }
@@ -717,20 +760,20 @@ async function startServer() {
 
         const deleteRes = await client.query(
           `DELETE FROM meesho_transactions
-           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
-          [user.id, gstin, String(periodMonth), String(periodYear)]
+           WHERE user_id = $1 AND UPPER(gstin) = UPPER($2) AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
+          [user.id, String(gstin), String(periodMonth), String(periodYear)]
         );
 
         await client.query(
           `DELETE FROM uploaded_files
-           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
-          [user.id, gstin, String(periodMonth), String(periodYear)]
+           WHERE user_id = $1 AND UPPER(gstin) = UPPER($2) AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
+          [user.id, String(gstin), String(periodMonth), String(periodYear)]
         );
 
         await client.query(
           `DELETE FROM gstr1_reports
-           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
-          [user.id, gstin, String(periodMonth), String(periodYear)]
+           WHERE user_id = $1 AND UPPER(gstin) = UPPER($2) AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
+          [user.id, String(gstin), String(periodMonth), String(periodYear)]
         );
 
         await client.query('COMMIT');

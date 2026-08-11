@@ -9,6 +9,7 @@ import { TCSReconcile } from './components/TCSReconcile';
 import { GSTR1Report } from './components/GSTR1Report';
 import { AuthModal } from './components/AuthModal';
 import { HelpGuide } from './components/HelpGuide';
+import { authFetch, removeStoredSessionId } from './utils/api';
 
 export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -22,7 +23,7 @@ export default function App() {
   // 1. Check existing authenticated session on startup
   useEffect(() => {
     let isMounted = true;
-    fetch('/api/auth/me')
+    authFetch('/api/auth/me')
       .then((res) => res.json())
       .then((data) => {
         if (!isMounted) return;
@@ -42,52 +43,7 @@ export default function App() {
     return () => { isMounted = false; };
   }, []);
 
-  // 2. Perform one-time migration from LocalStorage if needed
-  const performLocalStorageMigration = async () => {
-    try {
-      const migrationDone = localStorage.getItem('gst_migrated_to_neon_v1');
-      if (migrationDone === 'true') return;
-
-      const localProfilesRaw = localStorage.getItem('gstin_profiles');
-      const localProfiles: GSTINProfile[] = localProfilesRaw ? JSON.parse(localProfilesRaw) : [];
-
-      const transactionsGrouped: Record<string, any> = {};
-
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith('gst_tx_')) {
-          const parts = key.split('_'); // gst, tx, gstin, month, year, marketplace
-          if (parts.length >= 6) {
-            const gstin = parts[2];
-            const periodMonth = parts[3];
-            const periodYear = parts[4];
-            try {
-              const txs = JSON.parse(localStorage.getItem(key) || '[]');
-              if (Array.isArray(txs) && txs.length > 0) {
-                transactionsGrouped[key] = { gstin, periodMonth, periodYear, transactions: txs };
-              }
-            } catch (e) {
-              console.error('Migration error reading key', key, e);
-            }
-          }
-        }
-      }
-
-      if (localProfiles.length > 0 || Object.keys(transactionsGrouped).length > 0) {
-        await fetch('/api/migrate-local-data', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profiles: localProfiles, transactionsGrouped }),
-        });
-      }
-
-      localStorage.setItem('gst_migrated_to_neon_v1', 'true');
-    } catch (err) {
-      console.error('Failed LocalStorage migration:', err);
-    }
-  };
-
-  // 3. Load user profiles from DB when authenticated
+  // 2. Load user profiles from DB when authenticated
   useEffect(() => {
     if (!user) {
       setProfiles([]);
@@ -99,10 +55,8 @@ export default function App() {
     let isMounted = true;
 
     const loadUserData = async () => {
-      await performLocalStorageMigration();
-
       try {
-        const res = await fetch('/api/profiles');
+        const res = await authFetch('/api/profiles');
         const data = await res.json();
         if (!isMounted) return;
 
@@ -112,33 +66,16 @@ export default function App() {
           const active = fetchedProfiles.find((p) => p.isActive) || fetchedProfiles[0];
           setActiveProfile(active);
         } else {
-          // Default profile if none exist
-          const defaultProf: GSTINProfile = {
-            id: `gstin_${Date.now()}`,
-            gstin: '07AARCM9332R1CQ',
-            tradeName: user.businessName || 'Zenith E-Commerce Traders',
-            partyName: user.name,
-            returnType: 'Monthly',
-            periodMonth: 'July',
-            periodYear: '2026',
-            isActive: true,
-            addedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
-            lastUsedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
-            stateCode: '07',
-            stateName: 'Delhi'
-          };
-          setProfiles([defaultProf]);
-          setActiveProfile(defaultProf);
-
-          // Save default profile to DB
-          await fetch('/api/profiles', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile: defaultProf }),
-          });
+          // If the authenticated user has no GST profiles, keep state clean (0 profiles)
+          setProfiles([]);
+          setActiveProfile(null);
         }
       } catch (err) {
         console.error('Failed loading seller profiles from database:', err);
+        if (isMounted) {
+          setProfiles([]);
+          setActiveProfile(null);
+        }
       }
     };
 
@@ -161,7 +98,7 @@ export default function App() {
       periodYear: activeProfile.periodYear
     });
 
-    fetch(`/api/transactions?${query.toString()}`)
+    authFetch(`/api/transactions?${query.toString()}`)
       .then((res) => res.json())
       .then((data) => {
         if (!isMounted) return;
@@ -182,16 +119,47 @@ export default function App() {
   // Handle imported transactions
   const handleDataImported = async (imported: MeeshoTransaction[]) => {
     setTransactions(imported);
-    if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
+
+    let targetProfile = activeProfile;
+
+    // If no active profile exists, auto-create a default active profile for the logged in user
+    if (!targetProfile) {
+      targetProfile = {
+        id: `gstin_${Date.now()}`,
+        gstin: '07AARCM9332R1CQ',
+        tradeName: user?.businessName || user?.name || 'Zenith Traders',
+        partyName: user?.name,
+        returnType: 'Monthly',
+        periodMonth: 'July',
+        periodYear: '2026',
+        isActive: true,
+        addedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
+        lastUsedDate: new Date().toLocaleDateString('en-GB').replace(/\//g, '-'),
+        stateCode: '07',
+        stateName: 'Delhi'
+      };
+      setProfiles([targetProfile]);
+      setActiveProfile(targetProfile);
+
+      try {
+        await authFetch('/api/profiles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: targetProfile }),
+        });
+      } catch (e) {
+        console.error('Failed auto-creating profile for import:', e);
+      }
+    }
 
     try {
-      await fetch('/api/transactions', {
+      await authFetch('/api/transactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          gstin: activeProfile.gstin,
-          periodMonth: activeProfile.periodMonth,
-          periodYear: activeProfile.periodYear,
+          gstin: targetProfile.gstin,
+          periodMonth: targetProfile.periodMonth,
+          periodYear: targetProfile.periodYear,
           marketplace: 'MEESHO',
           transactions: imported,
           overwrite: true
@@ -209,7 +177,7 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('/api/meesho-import', {
+      const response = await authFetch('/api/meesho-import', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -238,7 +206,7 @@ export default function App() {
   const handleDeleteTransaction = async (id: string) => {
     setTransactions((prev) => prev.filter((t) => t.id !== id));
     try {
-      await fetch('/api/transactions', {
+      await authFetch('/api/transactions', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id })
@@ -254,7 +222,7 @@ export default function App() {
     if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
 
     try {
-      await fetch('/api/transactions', {
+      await authFetch('/api/transactions', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -274,7 +242,7 @@ export default function App() {
     if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
 
     try {
-      await fetch('/api/transactions', {
+      await authFetch('/api/transactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -297,7 +265,7 @@ export default function App() {
     if (!activeProfile?.gstin || !activeProfile?.periodMonth || !activeProfile?.periodYear) return;
 
     try {
-      await fetch('/api/transactions', {
+      await authFetch('/api/transactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -331,11 +299,27 @@ export default function App() {
     setActiveProfile(updatedProfile);
 
     try {
-      await fetch('/api/profiles', {
+      await authFetch('/api/profiles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile: updatedProfile }),
       });
+
+      // If transactions exist in memory, save them to DB for this profile
+      if (transactions.length > 0) {
+        await authFetch('/api/transactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            gstin: updatedProfile.gstin,
+            periodMonth: updatedProfile.periodMonth,
+            periodYear: updatedProfile.periodYear,
+            marketplace: 'MEESHO',
+            transactions: transactions,
+            overwrite: true
+          })
+        });
+      }
     } catch (e) {
       console.error('Failed to save profile in DB:', e);
     }
@@ -359,7 +343,7 @@ export default function App() {
     setActiveProfile(updatedProf);
 
     try {
-      await fetch('/api/profiles', {
+      await authFetch('/api/profiles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile: updatedProf }),
@@ -372,10 +356,11 @@ export default function App() {
   // Logout
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      await authFetch('/api/auth/logout', { method: 'POST' });
     } catch (e) {
       console.error('Logout error:', e);
     }
+    removeStoredSessionId();
     setUser(null);
     setProfiles([]);
     setActiveProfile(null);
