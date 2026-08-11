@@ -334,7 +334,7 @@ async function startServer() {
 
       const txRes = await pool.query(
         `SELECT data FROM meesho_transactions
-         WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4
+         WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)
          ORDER BY created_at ASC`,
         [user.id, String(gstin), String(periodMonth), String(periodYear)]
       );
@@ -366,8 +366,8 @@ async function startServer() {
         if (overwrite) {
           await client.query(
             `DELETE FROM meesho_transactions
-             WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
-            [user.id, gstin, String(periodMonth), String(periodYear)]
+             WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND LOWER(period_year) = LOWER($4)`,
+            [user.id, String(gstin), String(periodMonth), String(periodYear)]
           );
         }
 
@@ -376,8 +376,8 @@ async function startServer() {
           await client.query(
             `INSERT INTO meesho_transactions (id, user_id, gstin, period_month, period_year, marketplace, data)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data`,
-            [txId, user.id, gstin, periodMonth, periodYear, marketplace, JSON.stringify(tx)]
+             ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, user_id = EXCLUDED.user_id, gstin = EXCLUDED.gstin, period_month = EXCLUDED.period_month, period_year = EXCLUDED.period_year`,
+            [txId, user.id, String(gstin), String(periodMonth), String(periodYear), String(marketplace), JSON.stringify(tx)]
           );
         }
 
@@ -566,6 +566,139 @@ async function startServer() {
   });
 
   // Delete Meesho Import Session API
+  app.post("/api/meesho-import", async (req, res) => {
+    try {
+      const user = await getAuthUser(req);
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+      }
+
+      const { gstin, periodMonth, periodYear, filesMeta, recordCount = 0 } = req.body;
+      if (!gstin || !periodMonth || !periodYear) {
+        return res.status(400).json({ success: false, message: "Missing required parameters." });
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        await client.query(
+          `DELETE FROM uploaded_files
+           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
+          [user.id, gstin, String(periodMonth), String(periodYear)]
+        );
+
+        if (filesMeta) {
+          if (filesMeta.tcsSales) {
+            await client.query(
+              `INSERT INTO uploaded_files (id, user_id, gstin, period_month, period_year, file_name, file_type, record_count)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [`file_${Date.now()}_1`, user.id, gstin, periodMonth, periodYear, filesMeta.tcsSales, 'tcs_sales', recordCount]
+            );
+          }
+          if (filesMeta.tcsSalesReturn) {
+            await client.query(
+              `INSERT INTO uploaded_files (id, user_id, gstin, period_month, period_year, file_name, file_type, record_count)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [`file_${Date.now()}_2`, user.id, gstin, periodMonth, periodYear, filesMeta.tcsSalesReturn, 'tcs_sales_return', recordCount]
+            );
+          }
+          if (filesMeta.taxInvoice) {
+            await client.query(
+              `INSERT INTO uploaded_files (id, user_id, gstin, period_month, period_year, file_name, file_type, record_count)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [`file_${Date.now()}_3`, user.id, gstin, periodMonth, periodYear, filesMeta.taxInvoice, 'tax_invoice_details', recordCount]
+            );
+          }
+        }
+
+        await client.query('COMMIT');
+        return res.json({ success: true, message: "File metadata saved to database." });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  app.get("/api/uploaded-files", async (req, res) => {
+    try {
+      const user = await getAuthUser(req);
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+      }
+
+      const { gstin, periodMonth, periodYear } = req.query;
+      const filesRes = await pool.query(
+        `SELECT id, file_name as "fileName", file_type as "fileType", record_count as "recordCount", uploaded_at as "uploadedAt"
+         FROM uploaded_files
+         WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4
+         ORDER BY uploaded_at DESC`,
+        [user.id, String(gstin), String(periodMonth), String(periodYear)]
+      );
+
+      return res.json({ success: true, files: filesRes.rows });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // GSTR-1 Report Persistence APIs
+  app.get("/api/gstr1-reports", async (req, res) => {
+    try {
+      const user = await getAuthUser(req);
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+      }
+
+      const { gstin, periodMonth, periodYear } = req.query;
+      const reportRes = await pool.query(
+        `SELECT data FROM gstr1_reports
+         WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4
+         ORDER BY updated_at DESC LIMIT 1`,
+        [user.id, String(gstin), String(periodMonth), String(periodYear)]
+      );
+
+      if (reportRes.rows.length === 0) {
+        return res.json({ success: true, report: null });
+      }
+
+      return res.json({ success: true, report: reportRes.rows[0].data });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  app.post("/api/gstr1-reports", async (req, res) => {
+    try {
+      const user = await getAuthUser(req);
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+      }
+
+      const { gstin, periodMonth, periodYear, reportData } = req.body;
+      if (!gstin || !periodMonth || !periodYear || !reportData) {
+        return res.status(400).json({ success: false, message: "Missing required report parameters." });
+      }
+
+      const reportId = `rep_${user.id}_${gstin}_${periodMonth}_${periodYear}`;
+      await pool.query(
+        `INSERT INTO gstr1_reports (id, user_id, gstin, period_month, period_year, data, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP`,
+        [reportId, user.id, gstin, periodMonth, periodYear, JSON.stringify(reportData)]
+      );
+
+      return res.json({ success: true, message: "Report saved successfully." });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   app.delete("/api/meesho-import", async (req, res) => {
     try {
       const user = await getAuthUser(req);
@@ -578,13 +711,36 @@ async function startServer() {
         return res.status(400).json({ success: false, message: "Missing parameters." });
       }
 
-      const deleteRes = await pool.query(
-        `DELETE FROM meesho_transactions
-         WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
-        [user.id, gstin, String(periodMonth), String(periodYear)]
-      );
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
 
-      return res.json({ success: true, deletedCount: deleteRes.rowCount, message: "Session deleted from database." });
+        const deleteRes = await client.query(
+          `DELETE FROM meesho_transactions
+           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
+          [user.id, gstin, String(periodMonth), String(periodYear)]
+        );
+
+        await client.query(
+          `DELETE FROM uploaded_files
+           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
+          [user.id, gstin, String(periodMonth), String(periodYear)]
+        );
+
+        await client.query(
+          `DELETE FROM gstr1_reports
+           WHERE user_id = $1 AND gstin = $2 AND LOWER(period_month) = LOWER($3) AND period_year = $4`,
+          [user.id, gstin, String(periodMonth), String(periodYear)]
+        );
+
+        await client.query('COMMIT');
+        return res.json({ success: true, deletedCount: deleteRes.rowCount, message: "Session deleted from database." });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });
     }

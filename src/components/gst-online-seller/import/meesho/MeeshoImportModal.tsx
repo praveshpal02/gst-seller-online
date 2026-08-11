@@ -165,30 +165,7 @@ export const MeeshoImportModal: React.FC<MeeshoImportModalProps> = ({
     setUploadSummary(null);
 
     try {
-      // 1. Send request to backend endpoint `/api/meesho-import`
-      try {
-        await fetch('/api/meesho-import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId,
-            gstin,
-            periodMonth,
-            periodYear,
-            marketplace: 'MEESHO',
-            forceReplace: true,
-            filesMeta: {
-              tcsSales: tcsSalesFile?.name,
-              tcsSalesReturn: tcsReturnFile?.name,
-              taxInvoice: taxInvoiceFile?.name
-            }
-          })
-        });
-      } catch (e) {
-        console.warn('Backend import registration warning:', e);
-      }
-
-      // 2. Parse client-side transactions from Excel
+      // 1. Parse client-side transactions from Excel
       const parsedTransactions = await parseMeeshoExcelFiles(
         {
           tcsSales: tcsSalesFile || undefined,
@@ -203,6 +180,29 @@ export const MeeshoImportModal: React.FC<MeeshoImportModalProps> = ({
         setUploadStatus('ERROR');
         setStatusMessage('No valid transaction records found in the uploaded Meesho reports.');
         return;
+      }
+
+      // 2. Register file upload metadata in backend DB
+      try {
+        await fetch('/api/meesho-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            gstin,
+            periodMonth,
+            periodYear,
+            marketplace: 'MEESHO',
+            recordCount: parsedTransactions.length,
+            filesMeta: {
+              tcsSales: tcsSalesFile?.name,
+              tcsSalesReturn: tcsReturnFile?.name,
+              taxInvoice: taxInvoiceFile?.name
+            }
+          })
+        });
+      } catch (e) {
+        console.warn('Backend import registration warning:', e);
       }
 
       const summary = calculateMeeshoImportSummary(parsedTransactions);

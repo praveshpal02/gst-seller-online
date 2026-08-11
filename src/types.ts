@@ -63,6 +63,7 @@ export interface MeeshoTransaction {
   sourceSheet?: string;
   sourceRow?: number | string;
   invoiceNumber?: string;
+  invoiceValue?: number;
   isCancelled?: boolean;
   customerGstin?: string;
   returnCategory?: string;

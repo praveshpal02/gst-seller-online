@@ -110,6 +110,45 @@ export async function initDatabaseSchema(): Promise<void> {
         ON manual_gstr1_entries(user_id, gstin, period_month, period_year);
     `);
 
+    // 6. Uploaded Files Metadata table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS uploaded_files (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        gstin TEXT NOT NULL,
+        period_month TEXT NOT NULL,
+        period_year TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_type TEXT NOT NULL,
+        record_count INTEGER DEFAULT 0,
+        uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_uploaded_files_user_period
+        ON uploaded_files(user_id, gstin, period_month, period_year);
+    `);
+
+    // 7. GSTR-1 Reports table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS gstr1_reports (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        gstin TEXT NOT NULL,
+        period_month TEXT NOT NULL,
+        period_year TEXT NOT NULL,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_gstr1_reports_user_period
+        ON gstr1_reports(user_id, gstin, period_month, period_year);
+    `);
+
     await client.query('COMMIT');
     console.log('[DATABASE] PostgreSQL schema initialized successfully in Neon.');
   } catch (err) {

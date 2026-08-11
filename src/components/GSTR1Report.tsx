@@ -264,19 +264,33 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
     const payload = {
       gstin: gstin || '07RAZPK0261B1ZC',
       fp: fpStr,
-      gt: Number(report.totalTaxable.toFixed(2)),
-      cur_gt: Number(report.totalTaxable.toFixed(2)),
-      b2cs: report.b2csList.map((item) => ({
-        sply_ty: item.stateCode === sellerState ? 'INTRA' : 'INTER',
-        pos: item.stateCode,
-        typ: 'OE',
-        rt: item.gstRate,
-        txval: Number(item.taxableValue.toFixed(2)),
-        iamt: Number(item.igstAmount.toFixed(2)),
-        camt: Number(item.cgstAmount.toFixed(2)),
-        samt: Number(item.sgstAmount.toFixed(2)),
-        csamt: 0
-      })),
+      version: 'GST3.1.6',
+      hash: 'hash',
+      b2cs: report.b2csList.map((item) => {
+        const isIntra = item.stateCode === sellerState;
+        if (isIntra) {
+          return {
+            sply_ty: 'INTRA',
+            rt: item.gstRate,
+            typ: 'OE',
+            pos: item.stateCode,
+            txval: Number(item.taxableValue.toFixed(2)),
+            camt: Number(item.cgstAmount.toFixed(2)),
+            samt: Number(item.sgstAmount.toFixed(2)),
+            csamt: 0
+          };
+        } else {
+          return {
+            sply_ty: 'INTER',
+            rt: item.gstRate,
+            typ: 'OE',
+            pos: item.stateCode,
+            txval: Number(item.taxableValue.toFixed(2)),
+            iamt: Number(item.igstAmount.toFixed(2)),
+            csamt: 0
+          };
+        }
+      }),
       supeco: {
         clttx: effectiveTable14.map((eco) => ({
           etin: eco.operatorGstin || operatorGstin || '07AARCM9332R1CQ',
@@ -284,56 +298,114 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
           igst: Number(eco.igstAmount.toFixed(2)),
           cgst: Number(eco.cgstAmount.toFixed(2)),
           sgst: Number(eco.sgstAmount.toFixed(2)),
-          cess: 0
+          cess: 0,
+          flag: 'N'
         }))
       },
       doc_issue: {
-        doc_det:
-          report.docIssue.categories && report.docIssue.categories.length > 0
-            ? report.docIssue.categories.map((cat, idx) => ({
-                doc_num: cat.docNum || idx + 1,
-                doc_typ: cat.docType,
+        doc_det: (() => {
+          const cats = report.docIssue.categories || [];
+          if (cats.length === 0) {
+            return [
+              {
+                doc_num: 1,
+                doc_typ: 'Invoices for outward supply',
                 docs: [
                   {
                     num: 1,
-                    from: cat.from || '1',
-                    to: cat.to || String(cat.totalCount),
-                    totnum: cat.totalCount,
-                    cancel: cat.cancelledCount,
-                    net_issue: cat.netIssuedCount
+                    from: '1',
+                    to: String(report.docIssue.totalInvoices),
+                    totnum: report.docIssue.totalInvoices,
+                    cancel: report.docIssue.cancelledDocs,
+                    net_issue: report.docIssue.totalInvoices - report.docIssue.cancelledDocs
                   }
                 ]
+              },
+              {
+                doc_num: 5,
+                doc_typ: 'Credit Note',
+                docs: [
+                  {
+                    num: 1,
+                    from: '1',
+                    to: String(report.docIssue.totalCreditNotes),
+                    totnum: report.docIssue.totalCreditNotes,
+                    cancel: 0,
+                    net_issue: report.docIssue.totalCreditNotes
+                  }
+                ]
+              }
+            ];
+          }
+
+          const invoiceCats = cats.filter((c) => c.docType === 'Invoices for outward supply');
+          const creditCats = cats.filter((c) => c.docType === 'Credit Note');
+          const otherCats = cats.filter(
+            (c) => c.docType !== 'Invoices for outward supply' && c.docType !== 'Credit Note'
+          );
+
+          const docDet: Array<{
+            doc_num: number;
+            doc_typ: string;
+            docs: Array<{
+              num: number;
+              from: string;
+              to: string;
+              totnum: number;
+              cancel: number;
+              net_issue: number;
+            }>;
+          }> = [];
+
+          if (invoiceCats.length > 0) {
+            docDet.push({
+              doc_num: 1,
+              doc_typ: 'Invoices for outward supply',
+              docs: invoiceCats.map((cat, idx) => ({
+                num: idx + 1,
+                from: cat.from || '1',
+                to: cat.to || String(cat.totalCount),
+                totnum: cat.totalCount,
+                cancel: cat.cancelledCount,
+                net_issue: cat.netIssuedCount
               }))
-            : [
+            });
+          }
+
+          if (creditCats.length > 0) {
+            docDet.push({
+              doc_num: 5,
+              doc_typ: 'Credit Note',
+              docs: creditCats.map((cat, idx) => ({
+                num: idx + 1,
+                from: cat.from || '1',
+                to: cat.to || String(cat.totalCount),
+                totnum: cat.totalCount,
+                cancel: cat.cancelledCount,
+                net_issue: cat.netIssuedCount
+              }))
+            });
+          }
+
+          otherCats.forEach((cat) => {
+            docDet.push({
+              doc_num: cat.docNum || (docDet.length + 1),
+              doc_typ: cat.docType,
+              docs: [
                 {
-                  doc_num: 1,
-                  doc_typ: 'Invoices for outward supply',
-                  docs: [
-                    {
-                      num: 1,
-                      from: '1',
-                      to: String(report.docIssue.totalInvoices),
-                      totnum: report.docIssue.totalInvoices,
-                      cancel: report.docIssue.cancelledDocs,
-                      net_issue: report.docIssue.totalInvoices - report.docIssue.cancelledDocs
-                    }
-                  ]
-                },
-                {
-                  doc_num: 2,
-                  doc_typ: 'Credit Note',
-                  docs: [
-                    {
-                      num: 1,
-                      from: '1',
-                      to: String(report.docIssue.totalCreditNotes),
-                      totnum: report.docIssue.totalCreditNotes,
-                      cancel: 0,
-                      net_issue: report.docIssue.totalCreditNotes
-                    }
-                  ]
+                  num: 1,
+                  from: cat.from || '1',
+                  to: cat.to || String(cat.totalCount),
+                  totnum: cat.totalCount,
+                  cancel: cat.cancelledCount,
+                  net_issue: cat.netIssuedCount
                 }
               ]
+            });
+          });
+
+          return docDet;
+        })()
       },
       ...(hsnToggle
         ? {
@@ -359,7 +431,6 @@ export const GSTR1Report: React.FC<GSTR1ReportProps> = ({
     console.log('[JSON EXPORT EXECUTED] src/components/GSTR1Report.tsx -> handleExportJSON');
     console.log('Filing Period:', fpStr);
     console.log('GSTIN:', payload.gstin);
-    console.log('gt / cur_gt:', payload.gt);
     console.log('b2cs records count in JSON:', payload.b2cs.length);
     console.log('doc_issue categories count in JSON:', payload.doc_issue.doc_det.length);
     console.log('doc_issue details:', JSON.stringify(payload.doc_issue.doc_det, null, 2));
